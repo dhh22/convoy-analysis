@@ -1,0 +1,192 @@
+---
+title: "Convoy analysis"
+author: "Eetu Mäkelä"
+date: "`r Sys.Date()`"
+output: 
+  html_notebook:
+    code_folding: hide
+    toc: yes
+---
+
+# Setup
+
+```{r setup,include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+library(here)
+source(here("code/common_basis.R"), local = knitr::knit_global())
+
+library(glue)
+library(tidyverse)
+library(lubridate)
+library(hms)
+library(ggbeeswarm)
+library(pak)
+pkg_install("hsci-r/gghsci")
+library(gghsci)
+library(gt)
+
+p <- function(number) {
+  return(format(number, scientific = FALSE, big.mark = ","))
+}
+pp <- function(percentage,accuracy=0.01) {
+  return(scales::percent(percentage, accuracy = accuracy))
+}
+```
+
+# General analysis
+
+```{r}
+tweets_c %>%
+  count(original,name="tweets") %>%
+  mutate(original=if_else(original==1,"original sample","expanded discussion")) %>%
+  gt(rowname_col = "original") %>%
+  fmt_integer(tweets) %>%
+  summary_rows(columns=tweets, fns=list(total="sum"))
+```
+
+## Overall temporal outlook (note logarithmic y-scale)
+```{r}
+tweets_c %>%
+  count(year_created_at,month_created_at) %>% 
+  mutate(type="tweets") %>%
+  collect() %>%
+  bind_rows(
+    tweets_c %>% 
+      filter(conversation_id==tweet_id) %>%
+      count(year_created_at,month_created_at) %>% 
+      mutate(type="conversations") %>%
+      collect()
+  ) %>%
+  mutate(date=make_date(year_created_at,month_created_at)) %>%
+  ggplot(aes(x=date,y=n,color=type)) +
+  geom_line() +
+  theme_hsci_discrete() + 
+  scale_y_log10(labels=scales::comma) +
+  labs(color=NULL) +
+  scale_x_date(date_breaks="2 years",date_labels = "%Y")
+```
+
+Overall, our data has the most conversations and tweets in the period from which the seed tweets were gathered from, but interestingly, there are also multiple discussions that have gone on for much longer. Particularly interesting is the huge spike in tweets originating from 2016 and still continuing, to which the convoy-tweets get attached to.
+
+# Freedom convoy -period (first two weeks)
+
+## Total tweets in original sample
+
+```{r}
+tweets_c %>% 
+  filter(original,created_at>=as.Date("2022-01-22"),created_at<as.Date("2022-02-05")) %>%
+  mutate(date=date(created_at)) %>%
+  group_by(date) %>%
+  summarize(`sample tweets`=n(), `sample non-retweets`=sum(is.na(retweet_of)), conversations=n_distinct(conversation_id), `ur-conversations`=n_distinct(ur_conversation_id),.groups="drop") %>%
+  collect() %>%
+  pivot_longer(`sample tweets`:`ur-conversations`) %>%
+  bind_rows(
+    tweets_c %>% 
+      filter(original,created_at>=as.Date("2022-01-22"),created_at<as.Date("2022-02-05")) %>%
+      distinct(ur_conversation_id) %>%
+      left_join(tweets_c,by=c("ur_conversation_id")) %>%
+      filter(created_at>=as.Date("2022-01-22"),created_at<as.Date("2022-02-05")) %>%
+      mutate(date=date(created_at)) %>%
+      group_by(date) %>%
+      summarize(`total tweets in ur-conversations`=n(), `non-retweets in ur-conversations`=sum(is.na(retweet_of))) %>%
+      collect() %>%
+      pivot_longer(`total tweets in ur-conversations`:`non-retweets in ur-conversations`)
+  ) %>%
+  ggplot(aes(x=date,y=value,color=name)) +
+  geom_step() +
+  theme_hsci_discrete() +
+  scale_y_continuous(labels=scales::comma) +
+  labs(color=NULL) +
+  ylab("N")
+```
+
+## Discussion length power-law
+
+```{r}
+tweets_c %>%
+  count(conversation_id) %>%
+  ggplot(aes(x=n)) +
+  geom_histogram(bins=100) +
+  scale_y_log10(labels=scales::comma) +
+  scale_x_log10(labels=scales::comma) +
+  theme_hsci_discrete() +
+  ylab("Number of discussions") +
+  xlab("Tweets in discussion")
+ 
+```
+
+A typical power-law relationship: there are a great many discussions with only a few replies, and very few discussions that go on forever
+
+## Retweet/reply count relationship
+
+```{r}
+tweets_c %>% mutate(
+  rt_bin=floor(log2(retweet_count)),
+  reply_bin=floor(log2(reply_count))
+) %>% 
+  replace_na(list(rt_bin=0,reply_bin=0)) %>%
+  count(rt_bin,reply_bin) %>%
+  mutate(n_bin=floor(log2(n))) %>%
+  ggplot(aes(x=rt_bin,y=reply_bin,fill=n_bin)) +
+  geom_raster() +
+  scale_x_continuous(labels=~scales::comma(2^.)) +
+  scale_y_continuous(labels=~scales::comma(2^.)) +
+  theme_hsci() +
+  scale_fill_viridis_c(labels=~scales::comma(2^.)) +
+  xlab("Retweets") +
+  ylab("Replies") +
+  labs(fill="Tweets")
+```
+
+It is quite possible for a tweet to garner a huge number of retweets without sparking any discussion. The opposite is much less likely. Apart from this, the number of retweets and replies is correlated.
+
+# Some large conversations
+
+```{r}
+d <- ur_conversations_c %>% 
+  arrange(desc(uc_ur_descendants)) %>% 
+  head(7) %>%
+  select(ur_conversation_id) %>%
+  left_join(tweets_c,by=c("ur_conversation_id")) %>%
+  mutate(year=year(created_at),month=month(created_at)) %>%
+  group_by(ur_conversation_id,year,month) %>% 
+  mutate(ur_conversation_id=as.character(ur_conversation_id)) %>%
+  summarize(n=n(),authors=n_distinct(author_id),.groups="drop") %>%
+  collect() %>%
+  mutate(date=make_date(year,month)) 
+d %>%
+  ggplot(aes(x=date,y=n,color=ur_conversation_id)) +
+  geom_step() +
+  theme_hsci_discrete()
+d %>%
+  ggplot(aes(x=date,y=authors,color=ur_conversation_id)) +
+  geom_step() +
+  theme_hsci_discrete()
+```
+
+```{r}
+ur_conversations_c %>% 
+  arrange(desc(uc_ur_descendants)) %>% 
+  head(10) %>%
+  select(ur_conversation_id,uc_ur_descendants,ur_descendants,ur_mean_reply_count,ur_mean_retweet_count) %>%
+  left_join(tweets_c %>% select(ur_conversation_id,author_id),by=c("ur_conversation_id")) %>%
+  group_by(ur_conversation_id,uc_ur_descendants,ur_descendants,ur_mean_reply_count,ur_mean_retweet_count) %>%
+  summarize(authors=n_distinct(author_id),.groups="drop") %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  arrange(desc(uc_ur_descendants)) %>%
+  collect() %>%
+  relocate(authors,.after=ur_descendants) %>%
+  gt() %>%
+  fmt_markdown(ur_conversation_id) %>%
+  fmt_integer(uc_ur_descendants:authors) %>%
+  fmt_number(ur_mean_reply_count:ur_mean_retweet_count)
+```
+
+
+```{r}
+descendants <- function(tweet_id) { 
+  tbl(con,sql(glue("WITH RECURSIVE descendants AS ( SELECT t.tweet_id,t.in_reply_to FROM tweets_a t WHERE tweet_id={tweet_id} UNION SELECT t.tweet_id,t.in_reply_to FROM tweets_a t, descendants d WHERE t.in_reply_to=d.tweet_id ) SELECT * FROM descendants"))) 
+}
+descendants("647567168167636992") %>% head(10) %>% select(tweet_id) %>% left_join(tweets_a,by=c("tweet_id")) %>% select(text)
+```
+
