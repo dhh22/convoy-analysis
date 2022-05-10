@@ -42,16 +42,18 @@ tweets_c %>%
   summary_rows(columns=tweets, fns=list(total="sum"))
 ```
 
+Original sample is defined as follows: `twarc2 search --archive --start-time '2022-01-22' --end-time '2022-02-05' 'lang:en ("#TruckersForFreedom" OR "#FreedomConvoy2022" OR "#TruckerConvoy2022" OR "#NoVaccineMandate" OR "#ConvoyForFreedom" OR "#FreedomConvoyCanada" OR "#FluTruxKlan" OR "#FluTrucksKlan" OR "#EndTheStigma" OR "#TrudeauIsACoward" OR "#CowardOfCanada" OR "#ResignTrudeau" OR "#Omicronvoy" OR "#OttawaOccupation" OR "#HonkHonk" OR "#honkhonk" OR "#TruckersForFreedom2020" OR "#freedomconvoy" OR "#OttawaOccupied" OR "#TrudeauMustResign" OR "#OttawaSiege" OR "#CanadaTruckers" OR "#OttawaOccupiers" OR "#freedomconvoy22" OR "#TrudeauTyranny" OR "#FluTruckKlan" OR "#GoHomeTruckers" OR "#ConvoyGoHome" OR "#GoHomeFluTruxclan" OR "#flutrucksclangohome" OR "#freedumbConvoy2022" OR "#Clownvoy" OR "#FluTruxKlanGoHome" OR "#GoHomeConvoy" OR "#IAmVaxxed" OR "#ConvoyGoHome" OR "Go Home" OR "Canadian Trucking Alliance" OR "PM Trudeau" OR "Prime Minister Justin Trudeau" OR "Prime Minister")' convoy_2weeks.jsonl`
+
 ## Raw access to the tweet data
 
-The tweets are stored in a MariaDB (MySQL) database called `convoy` on host `vm1788.kaj.pouta.csc.fi`. The username for the database is `convoy`. The password is given separately. **DO NOT INCLUDE THE PASSWORD IN ANY CODE YOU COMMIT TO GITHUB**. If running this notebook, it will ask for the password the first time you run it, and then store it separately in your keyring.
+The tweets are stored in a [MariaDB](https://mariadb.com/) (MySQL) database called `convoy` on host `vm1788.kaj.pouta.csc.fi`. The username for the database is `convoy`. The password is given separately. **DO NOT INCLUDE THE PASSWORD IN ANY CODE YOU COMMIT TO GITHUB**. If running this notebook, it will ask for the password the first time you run it, and then store it separately in your keyring.
 
 Our raw data is both large and complex. With such data, one cannot unfortunately always just use a default database configuration and trust that it does the right thing. Therefore, here are some details:
 
- * The data has been loaded into both Aria as well as ColumnStore tables. Aria tables have a suffix of `_a` and ColumnStore tables a suffix of `_c`. 
+ * The data has been loaded into both [Aria](kb/en/aria-storage-engine/) as well as [ColumnStore](https://mariadb.com/kb/en/mariadb-columnstore/) tables. Aria tables have a suffix of `_a` and ColumnStore tables a suffix of `_c`. 
  * Generally, ColumnStore tables should be more performant for the types of analytical queries we are performing, so use those as a default. 
  * However, for certain queries (at least including UNION ALL), the ColumnStore does weird things and is bog slow. For those, the `_a` variants may perform better.
- * The ColumnStore does not support `WITH RECURSIVE` queries useful for thread analysis. Therefore, these have to be computed using Aria `_a` tables.
+ * The ColumnStore does not support [recursive queries](https://mariadb.com/kb/en/recursive-common-table-expressions-overview/) useful for thread analysis. Therefore, these have to be computed using Aria `_a` tables.
  * Mixing the two types of tables should often lead to worse performance (but may not)
    
 The database structure is as follows:
@@ -128,6 +130,7 @@ To get to know R `tidyverse`, here are some great tutorials:
  * And finally “R for Data Science” is a central work by the authors of the packages, but I don’t think as good as the above: https://r4ds.had.co.nz/. Can be used to supplement the modern dive if something remains unclear or needs deepening after that.
 
 ## Overall temporal outlook (note logarithmic y-scale)
+
 ```{r}
 tweets_c %>%
   count(year_created_at,month_created_at) %>% 
@@ -142,7 +145,7 @@ tweets_c %>%
   ) %>%
   mutate(date=make_date(year_created_at,month_created_at)) %>%
   ggplot(aes(x=date,y=n,color=type)) +
-  geom_line() +
+  geom_step() +
   theme_hsci_discrete() + 
   scale_y_log10(labels=scales::comma) +
   labs(color=NULL) +
@@ -157,25 +160,46 @@ Overall, our data has the most conversations and tweets in the period from which
 
 ```{r}
 tweets_c %>% 
-  filter(original,created_at>=as.Date("2022-01-22"),created_at<as.Date("2022-02-05")) %>%
-  mutate(date=date(created_at)) %>%
-  group_by(date) %>%
+  filter(original,date_created_at>=as.Date("2022-01-22"),date_created_at<as.Date("2022-02-05")) %>%
+  group_by(date_created_at) %>%
   summarize(`sample tweets`=n(), `sample non-retweets`=sum(is.na(retweet_of)), conversations=n_distinct(conversation_id), `ur-conversations`=n_distinct(ur_conversation_id),.groups="drop") %>%
   collect() %>%
   pivot_longer(`sample tweets`:`ur-conversations`) %>%
   bind_rows(
     tweets_c %>% 
-      filter(original,created_at>=as.Date("2022-01-22"),created_at<as.Date("2022-02-05")) %>%
+      filter(original,date_created_at>=as.Date("2022-01-22"),date_created_at<as.Date("2022-02-05")) %>%
       distinct(ur_conversation_id) %>%
       left_join(tweets_c,by=c("ur_conversation_id")) %>%
-      filter(created_at>=as.Date("2022-01-22"),created_at<as.Date("2022-02-05")) %>%
-      mutate(date=date(created_at)) %>%
-      group_by(date) %>%
+      filter(date_created_at>=as.Date("2022-01-22"),date_created_at<as.Date("2022-02-05")) %>%
+      group_by(date_created_at) %>%
       summarize(`total tweets in ur-conversations`=n(), `non-retweets in ur-conversations`=sum(is.na(retweet_of))) %>%
       collect() %>%
       pivot_longer(`total tweets in ur-conversations`:`non-retweets in ur-conversations`)
   ) %>%
-  ggplot(aes(x=date,y=value,color=name)) +
+  bind_rows(
+    tbl(con,sql('
+    WITH RECURSIVE descendants AS ( 
+      SELECT t.tweet_id, t.in_reply_to, t.date_created_at 
+      FROM tweets_a t 
+      WHERE 
+        t.original AND 
+        t.created_at>="2022-01-22" AND 
+        t.created_at<"2022-02-05"
+      UNION 
+      SELECT t.tweet_id, t.in_reply_to, t.date_created_at 
+      FROM tweets_a t, descendants d 
+      WHERE 
+        t.in_reply_to=d.tweet_id AND
+        t.created_at>="2022-01-22" AND 
+        t.created_at<"2022-02-05"
+    ) 
+    SELECT date_created_at, COUNT(*) AS value
+    FROM descendants
+    GROUP BY date_created_at')) %>%
+    collect() %>%
+    mutate(name="total tweets in downstream discussions")
+  ) %>%
+  ggplot(aes(x=date_created_at,y=value,color=name)) +
   geom_step() +
   theme_hsci_discrete() +
   scale_y_continuous(labels=scales::comma) +
