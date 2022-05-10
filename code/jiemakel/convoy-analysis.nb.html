@@ -11,7 +11,7 @@
 
 <meta name="author" content="Eetu Mäkelä" />
 
-<meta name="date" content="2022-05-09" />
+<meta name="date" content="2022-05-10" />
 
 <title>Convoy analysis</title>
 
@@ -1766,15 +1766,19 @@ pre code {
 
 <h1 class="title toc-ignore">Convoy analysis</h1>
 <h4 class="author">Eetu Mäkelä</h4>
-<h4 class="date">2022-05-09</h4>
+<h4 class="date">2022-05-10</h4>
 
 </div>
 
 <div id="TOC">
 <ul>
-<li><a href="#setup">Setup</a></li>
 <li><a href="#general-analysis">General analysis</a>
 <ul>
+<li><a href="#raw-access-to-the-tweet-data">Raw access to the tweet
+data</a></li>
+<li><a href="#statistics-for-conversations-and-ur-conversations">Statistics for
+conversations and ur-conversations</a></li>
+<li><a href="#using-the-data-inside-r">Using the data inside R</a></li>
 <li><a href="#overall-temporal-outlook-note-logarithmic-y-scale">Overall
 temporal outlook (note logarithmic y-scale)</a></li>
 </ul></li>
@@ -1783,7 +1787,7 @@ temporal outlook (note logarithmic y-scale)</a></li>
 <ul>
 <li><a href="#total-tweets-in-original-sample">Total tweets in original
 sample</a></li>
-<li><a href="#discussion-length-power-law">Discussion length
+<li><a href="#conversation-length-power-law">Conversation length
 power-law</a></li>
 <li><a href="#retweetreply-count-relationship">Retweet/reply count
 relationship</a></li>
@@ -1794,11 +1798,8 @@ conversations</a></li>
 </div>
 
 <!-- rnb-text-begin -->
-<div id="setup" class="section level1">
-<h1>Setup</h1>
 <!-- rnb-text-end -->
 <!-- rnb-text-begin -->
-</div>
 <div id="general-analysis" class="section level1">
 <h1>General analysis</h1>
 <!-- rnb-text-end -->
@@ -2252,6 +2253,211 @@ conversations</a></li>
 
 <!-- rnb-chunk-end -->
 <!-- rnb-text-begin -->
+<div id="raw-access-to-the-tweet-data" class="section level2">
+<h2>Raw access to the tweet data</h2>
+<p>The tweets are stored in a MariaDB (MySQL) database called
+<code>convoy</code> on host <code>vm1788.kaj.pouta.csc.fi</code>. The
+username for the database is <code>convoy</code>. The password is given
+separately. <strong>DO NOT INCLUDE THE PASSWORD IN ANY CODE YOU COMMIT
+TO GITHUB</strong>. If running this notebook, it will ask for the
+password the first time you run it, and then store it separately in your
+keyring.</p>
+<p>Our raw data is both large and complex. With such data, one cannot
+unfortunately always just use a default database configuration and trust
+that it does the right thing. Therefore, here are some details:</p>
+<ul>
+<li>The data has been loaded into both Aria as well as ColumnStore
+tables. Aria tables have a suffix of <code>_a</code> and ColumnStore
+tables a suffix of <code>_c</code>.</li>
+<li>Generally, ColumnStore tables should be more performant for the
+types of analytical queries we are performing, so use those as a
+default.</li>
+<li>However, for certain queries (at least including UNION ALL), the
+ColumnStore does weird things and is bog slow. For those, the
+<code>_a</code> variants may perform better.</li>
+<li>The ColumnStore does not support <code>WITH RECURSIVE</code> queries
+useful for thread analysis. Therefore, these have to be computed using
+Aria <code>_a</code> tables.</li>
+<li>Mixing the two types of tables should often lead to worse
+performance (but may not)</li>
+</ul>
+<p>The database structure is as follows:</p>
+<ul>
+<li><code>tweets_[a|c]</code> is the main table holding the tweets as
+well as their statistics.</li>
+<li><code>users_[a|c]</code> contains user information. It is linked
+from <code>tweets</code> by <code>author_id</code> and
+<code>in_reply_to_user_id</code>.</li>
+<li><code>tweet_mentions_[a|c]</code> links <code>tweet_id</code>s to
+<code>user_id</code>s they mention.</li>
+<li><code>tweet_hashtags_[a|c]</code> links <code>tweet_id</code>s to
+the hashtags they contain.</li>
+<li><code>tweet_urls_[a|c]</code> links <code>tweet_id</code>s to the
+urls they contain.</li>
+<li><code>conversations_[a|c]</code> contains conversation-level info
+and stats for each <code>conversation_id</code>.</li>
+<li><code>ur_conversations_[a|c]</code> contains ur-conversation-level
+info and stats for each <code>ur_conversation_id</code>.</li>
+</ul>
+<p>In the above, a <em>conversation</em> is a thread linked by
+<code>in_reply_to</code> links. In this view, whenever you retweet a
+tweet or quote-tweet it, you are starting a new, distinct converstaion
+instead of continuing an existing one. This is what the Twitter API
+deems a conversation and what their UI also generally shows, so a good
+view when examining conversations from a user’s perspective. However,
+when looking at a conversation in aggregate, one may also want to look
+at <em>all</em> conversation sparked by some message, and include
+downstream conversations started from retweets and quotes as well. For
+this, our data also includes an <code>ur_conversation_id</code>, which
+joins together all tweets in some way related to a single starter or its
+descendants, whether there are retweets or quote-tweets in the middle of
+that chain or not.</p>
+<p>However, there is are two important caveats here:</p>
+<ol style="list-style-type: decimal">
+<li>When tweets/users get deleted by twitter, it breaks the conversation
+chain upwards from the deleted tweet. This affects both ur-conversation
+resolution as well as calculating conversation statistics.</li>
+<li>It is possible for a tweet to be both a reply to a tweet as well as
+quote another tweet. For simplicity in this hackathon (for the
+conversations to remain clean trees instead of possibly cyclical DAGs),
+in such situations the tweet has <strong>only</strong> been associated
+with the ur-conversation to which it replies.</li>
+</ol>
+</div>
+<div id="statistics-for-conversations-and-ur-conversations" class="section level2">
+<h2>Statistics for conversations and ur-conversations</h2>
+<p>The following statistics have been calculated for conversations and
+ur-conversations, and are available in the <code>tweets_[a|c]</code>
+table (remember that removed tweets can cause problems for most of
+these):</p>
+<ul>
+<li><code>children</code>: the number of replies to this tweet</li>
+<li><code>ur_children</code>: the number of retweets and quotes of, and
+replies to this tweet</li>
+<li><code>descendants</code>: the total number of tweets after this one
+in the conversation</li>
+<li><code>ur_descendants</code>: the total number of tweets after this
+one in the ur-conversation</li>
+<li><code>leaf_descendants</code>: the total number of leaf tweets
+(tweets without further replies) in the conversation (a measure of
+conversation “breadth”)</li>
+<li><code>ur_leaf_descendants</code>: the total number of leaf tweets
+(tweets without further replies) in the ur-conversation (a measure of
+ur-conversation “breadth”)</li>
+<li><code>max_depth</code>: the maximum length reply chain discovered
+below this tweet</li>
+<li><code>ur_max_depth</code>: the maximum length reply/retweet/quote
+chain discovered below this tweet</li>
+<li><code>t_authors</code>: the total transitive amount of authors
+participating in the conversation branching down from this tweet</li>
+<li><code>ur_t_authors</code>: the total transitive amount of authors
+participating in the ur-conversation branching down from this tweet</li>
+<li><code>t_reply_count</code>: the total transitive reply count of the
+conversation branching down from this tweet (should be about equal to
+<code>descendants</code> if there are not too many missing tweets)</li>
+<li><code>ur_t_reply_count</code>: the total transitive reply count of
+the ur-conversation branching down from this tweet</li>
+<li><code>t_quote_count</code>: the total transitive quote count of the
+conversation branching down from this tweet</li>
+<li><code>ur_t_quote_count</code>: the total transitive quote count of
+the ur-conversation branching down from this tweet</li>
+<li><code>t_like_count</code>: the total transitive like count of the
+conversation branching down from this tweet</li>
+<li><code>ur_t_like_count</code>: the total transitive like count of the
+ur-conversation branching down from this tweet</li>
+<li><code>t_retweet_count</code>: the total transitive retweet count of
+the conversation branching down from this tweet</li>
+<li><code>ur_t_retweet_count</code>: the total transitive retweet count
+of the ur-conversation branching down from this tweet</li>
+<li><code>branching_factor</code>: the branching factor of the
+conversation tree, or the mean number of replies for each tweet that has
+replies</li>
+<li><code>ur_branching_factor</code>: the branching factor of the
+ur-conversation tree, or the mean number of replies+quotes+retweets for
+each tweet that has them</li>
+<li><code>mean_depth</code>: the mean depth of conversation branching
+down from this tweet</li>
+<li><code>depth_mad</code>: the mean absolute deviation (a measure of
+variance) from the mean conversation depth</li>
+<li><code>ur_mean_depth</code>: the mean depth of ur-conversation
+branching down from this tweet</li>
+<li><code>ur_depth_mad</code>: the mean absolute deviation (a measure of
+variance) from the mean ur-conversation depth</li>
+<li><code>mean_reply_count</code>: the mean count of replies for each
+tweet in the conversation branching down from this tweet</li>
+<li><code>reply_count_mad</code>: the mean absolute deviation (a measure
+of variance) from the mean reply count</li>
+<li><code>ur_mean_reply_count</code>: the mean count of replies for each
+tweet in the ur-conversation branching down from this tweet</li>
+<li><code>ur_reply_count_mad</code>: the mean absolute deviation (a
+measure of variance) from the mean ur-conversation reply count</li>
+<li><code>mean_quote_count</code>: the mean count of quotations of each
+tweet in the conversation branching down from this tweet</li>
+<li><code>quote_count_mad</code>: the mean absolute deviation (a measure
+of variance) from the mean quotation count</li>
+<li><code>ur_mean_quote_count</code>: the mean count of quotations of
+each tweet in the ur-conversation branching down from this tweet</li>
+<li><code>ur_quote_count_mad</code>: the mean absolute deviation (a
+measure of variance) from the mean ur-conversation quotation count</li>
+<li><code>mean_like_count</code>: the mean count of likes of each tweet
+in the conversation branching down from this tweet</li>
+<li><code>like_count_mad</code>: the mean absolute deviation (a measure
+of variance) from the mean conversation like count</li>
+<li><code>ur_mean_like_count</code>: the mean count of likes of each
+tweet in the ur-conversation branching down from this tweet</li>
+<li><code>ur_like_count_mad</code>: the mean absolute deviation (a
+measure of variance) from the mean ur-conversation like count</li>
+<li><code>mean_retweet_count</code>: the mean count of retweets of each
+tweet in the conversation branching down from this tweet</li>
+<li><code>retweet</code>_count_mad`: the mean absolute deviation (a
+measure of variance) from the mean conversation retweet count</li>
+<li><code>ur_mean_retweet_count</code>: the mean count of retweets of
+each tweet in the ur-conversation branching down from this tweet</li>
+<li><code>ur_retweet_count_mad</code>: the mean absolute deviation (a
+measure of variance) from the mean ur-conversation retweet count</li>
+</ul>
+</div>
+<div id="using-the-data-inside-r" class="section level2">
+<h2>Using the data inside R</h2>
+<p>Tweet, conversation, ur-conversation and user ids are all
+<code>BIGINT</code>s or 64bit integers in the database. R usually
+handles numbers in these ranges as doubles, which is problematic in the
+case of ids due to loss of precision (for example, 3.9272932^{-209}
+becomes actually 1488952698795962368). To account for such situations, R
+includes an <code>integer64</code> data type. However, it does not in
+general play nice with the R ecosystem. Therefore, the R database
+connection package allows one to either automatically translate
+<code>BIGINT</code>s to doubles or retain them as
+<code>integer64</code>s. While one could think that here the sensible
+option would be to retain all <code>BIGINT</code> columns as
+<code>integer64</code>s, a problem then appears where for example all
+<code>COUNT</code> results are <code>integer64</code> as well. As such
+counts are extremely common in our queries, always manually converting
+their results is arduous. Therefore, this notebook actually always
+includes two versions of the connection and tables: the one with an
+<code>_i</code> suffix does not translate results into doubles, while
+the one without the suffix does. The heuristic for using these two is
+basically as follows: if you do id-based joins wholly within the
+database before <code>collect()</code>ing results into R, it’s fine to
+use the non-suffixed versions of the tables. However, if you
+<strong>do</strong> pull in ids into R, it is crucial to use the
+<code>_i</code> versions, lest you end up with different ids than you
+should.</p>
+<p>To get to know R <code>tidyverse</code>, here are some great
+tutorials:</p>
+<ul>
+<li><a href="https://moderndive.com/index.html" class="uri">https://moderndive.com/index.html</a> chapters 1-4 are the
+best intro into R and tidyverse that I know of.</li>
+<li>Then, if you’re interested in expanding your visual analysis
+capabilities, following up with <a href="https://socviz.co/" class="uri">https://socviz.co/</a> is good.</li>
+<li>Excellent cheatsheets to keep on hand or even print while learning:
+<a href="https://www.rstudio.com/resources/cheatsheets/" class="uri">https://www.rstudio.com/resources/cheatsheets/</a></li>
+<li>And finally “R for Data Science” is a central work by the authors of
+the packages, but I don’t think as good as the above: <a href="https://r4ds.had.co.nz/" class="uri">https://r4ds.had.co.nz/</a>.
+Can be used to supplement the modern dive if something remains unclear
+or needs deepening after that.</li>
+</ul>
+</div>
 <div id="overall-temporal-outlook-note-logarithmic-y-scale" class="section level2">
 <h2>Overall temporal outlook (note logarithmic y-scale)</h2>
 <!-- rnb-text-end -->
@@ -2336,8 +2542,8 @@ This warning is displayed only once per session.</code></pre>
 <!-- rnb-chunk-end -->
 <!-- rnb-text-begin -->
 </div>
-<div id="discussion-length-power-law" class="section level2">
-<h2>Discussion length power-law</h2>
+<div id="conversation-length-power-law" class="section level2">
+<h2>Conversation length power-law</h2>
 <!-- rnb-text-end -->
 <!-- rnb-chunk-begin -->
 <!-- rnb-source-begin eyJkYXRhIjoiYGBgclxudHdlZXRzX2MgJT4lXG4gIGNvdW50KGNvbnZlcnNhdGlvbl9pZCkgJT4lXG4gIGdncGxvdChhZXMoeD1uKSkgK1xuICBnZW9tX2hpc3RvZ3JhbShiaW5zPTEwMCkgK1xuICBzY2FsZV95X2xvZzEwKGxhYmVscz1zY2FsZXM6OmNvbW1hKSArXG4gIHNjYWxlX3hfbG9nMTAobGFiZWxzPXNjYWxlczo6Y29tbWEpICtcbiAgdGhlbWVfaHNjaV9kaXNjcmV0ZSgpICtcbiAgeWxhYihcIk51bWJlciBvZiBkaXNjdXNzaW9uc1wiKSArXG4gIHhsYWIoXCJUd2VldHMgaW4gZGlzY3Vzc2lvblwiKVxuYGBgIn0= -->
@@ -2972,28 +3178,763 @@ d %&gt;%
 <!-- rnb-text-begin -->
 <!-- rnb-text-end -->
 <!-- rnb-chunk-begin -->
-<!-- rnb-source-begin eyJkYXRhIjoiYGBgclxuZGVzY2VuZGFudHMgPC0gZnVuY3Rpb24odHdlZXRfaWQpIHsgXG4gIHRibChjb24sc3FsKGdsdWUoXCJXSVRIIFJFQ1VSU0lWRSBkZXNjZW5kYW50cyBBUyAoIFNFTEVDVCB0LnR3ZWV0X2lkLHQuaW5fcmVwbHlfdG8gRlJPTSB0d2VldHNfYSB0IFdIRVJFIHR3ZWV0X2lkPXt0d2VldF9pZH0gVU5JT04gU0VMRUNUIHQudHdlZXRfaWQsdC5pbl9yZXBseV90byBGUk9NIHR3ZWV0c19hIHQsIGRlc2NlbmRhbnRzIGQgV0hFUkUgdC5pbl9yZXBseV90bz1kLnR3ZWV0X2lkICkgU0VMRUNUICogRlJPTSBkZXNjZW5kYW50c1wiKSkpIFxufVxuZGVzY2VuZGFudHMoXCI2NDc1NjcxNjgxNjc2MzY5OTJcIikgJT4lIGhlYWQoMTApICU+JSBzZWxlY3QodHdlZXRfaWQpICU+JSBsZWZ0X2pvaW4odHdlZXRzX2EpICU+JSBzZWxlY3QodGV4dClcbmBgYCJ9 -->
+<!-- rnb-source-begin eyJkYXRhIjoiYGBgclxuZGVzY2VuZGFudHMgPC0gZnVuY3Rpb24odHdlZXRfaWQpIHsgXG4gIHRibChjb24sc3FsKGdsdWUoXCJXSVRIIFJFQ1VSU0lWRSBkZXNjZW5kYW50cyBBUyAoIFNFTEVDVCB0LnR3ZWV0X2lkLHQuaW5fcmVwbHlfdG8sIDAgQVMgbGV2ZWwgRlJPTSB0d2VldHNfYSB0IFdIRVJFIHR3ZWV0X2lkPXt0d2VldF9pZH0gVU5JT04gU0VMRUNUIHQudHdlZXRfaWQsdC5pbl9yZXBseV90bywgZC5sZXZlbCsxIEFTIGxldmVsIEZST00gdHdlZXRzX2EgdCwgZGVzY2VuZGFudHMgZCBXSEVSRSB0LmluX3JlcGx5X3RvPWQudHdlZXRfaWQgKSBTRUxFQ1QgKiBGUk9NIGRlc2NlbmRhbnRzXCIpKSkgXG59XG51cl9jb252ZXJzYXRpb25zX2NfaSAlPiUgXG4gIGFycmFuZ2UoZGVzYyh1Y191cl9kZXNjZW5kYW50cykpICU+JSBcbiAgZmlsdGVyKCFpcy5uYSh0d2VldF9pZCkpICU+JVxuICBoZWFkKDEwKSAlPiUgXG4gIHNlbGVjdCh0d2VldF9pZCkgJT4lIFxuICBjb2xsZWN0KCkgJT4lIFxuICBtdXRhdGUoY29udmVyc2F0aW9uPW1hcCh0d2VldF9pZCx+ZGVzY2VuZGFudHMoLikgJT4lIFxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIGhlYWQoMjApICU+JSBcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBzZWxlY3QodHdlZXRfaWQsbGV2ZWwpICU+JSBcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsZWZ0X2pvaW4odHdlZXRzX2EsYnk9YyhcInR3ZWV0X2lkXCIpKSAlPiUgXG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgc2VsZWN0KGxldmVsLHRleHQpICU+JSBcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBtdXRhdGUocm93X251bWJlcj1yb3dfbnVtYmVyKCkpICU+JSBcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb2xsZWN0KCkpKSAlPiUgXG4gIHVubmVzdF93aWRlcihjb252ZXJzYXRpb24pICU+JSBcbiAgdW5uZXN0X2xvbmdlcihsZXZlbDpyb3dfbnVtYmVyKSAlPiUgXG4gIHBpdm90X3dpZGVyKG5hbWVzX2Zyb209dHdlZXRfaWQsdmFsdWVzX2Zyb209dGV4dCxpZF9jb2xzPXJvd19udW1iZXIpICU+JSBcbiAgc2VsZWN0KC1yb3dfbnVtYmVyKSAlPiVcbiAgZ3QoKVxuYGBgIn0= -->
 <pre class="r"><code>descendants &lt;- function(tweet_id) { 
-  tbl(con,sql(glue(&quot;WITH RECURSIVE descendants AS ( SELECT t.tweet_id,t.in_reply_to FROM tweets_a t WHERE tweet_id={tweet_id} UNION SELECT t.tweet_id,t.in_reply_to FROM tweets_a t, descendants d WHERE t.in_reply_to=d.tweet_id ) SELECT * FROM descendants&quot;))) 
+  tbl(con,sql(glue(&quot;WITH RECURSIVE descendants AS ( SELECT t.tweet_id,t.in_reply_to, 0 AS level FROM tweets_a t WHERE tweet_id={tweet_id} UNION SELECT t.tweet_id,t.in_reply_to, d.level+1 AS level FROM tweets_a t, descendants d WHERE t.in_reply_to=d.tweet_id ) SELECT * FROM descendants&quot;))) 
 }
-descendants(&quot;647567168167636992&quot;) %&gt;% head(10) %&gt;% select(tweet_id) %&gt;% left_join(tweets_a) %&gt;% select(text)</code></pre>
+ur_conversations_c_i %&gt;% 
+  arrange(desc(uc_ur_descendants)) %&gt;% 
+  filter(!is.na(tweet_id)) %&gt;%
+  head(10) %&gt;% 
+  select(tweet_id) %&gt;% 
+  collect() %&gt;% 
+  mutate(conversation=map(tweet_id,~descendants(.) %&gt;% 
+                            head(20) %&gt;% 
+                            select(tweet_id,level) %&gt;% 
+                            left_join(tweets_a,by=c(&quot;tweet_id&quot;)) %&gt;% 
+                            select(level,text) %&gt;% 
+                            mutate(row_number=row_number()) %&gt;% 
+                            collect())) %&gt;% 
+  unnest_wider(conversation) %&gt;% 
+  unnest_longer(level:row_number) %&gt;% 
+  pivot_wider(names_from=tweet_id,values_from=text,id_cols=row_number) %&gt;% 
+  select(-row_number) %&gt;%
+  gt()</code></pre>
 <!-- rnb-source-end -->
-<!-- rnb-output-begin eyJkYXRhIjoiSm9pbmluZywgYnkgPSBcInR3ZWV0X2lkXCJcbiJ9 -->
-<pre><code>Joining, by = &quot;tweet_id&quot;</code></pre>
-<!-- rnb-output-end -->
-<!-- rnb-frame-begin eyJtZXRhZGF0YSI6eyJjbGFzc2VzIjpbInRibF9Qb29sIiwidGJsX3NxbCIsInRibF9sYXp5IiwidGJsIl0sIm5yb3ciOltdLCJuY29sIjoxLCJzdW1tYXJ5Ijp7IlNvdXJjZSI6WyJsYXp5IHF1ZXJ5IFs/PyB4IDFdIl0sIkRhdGFiYXNlIjpbIm15c3FsICBbY29udm95QHZtMTc4OC5rYWoucG91dGEuY3NjLmZpOk5BL2NvbnZveV0iXX19LCJyZGYiOiJINHNJQUFBQUFBQUFBMjFRMFFxQ01CUzltaXNVS3FIdmNCQzk5QUhSQjBTQnIwdFhTYmFKVHZLeEw3ZXVhd01iRGJiZGUrNjVkK2Zzc0VzM1VSb0J3QVFDSDArQ0laRFRjWjlzUVNQZ1FRRGhjSGRZWG1rQUlBYTlmZ2hoTFo5VXNBZHZNSm4vSVJCYmpFZGdvSGluWEdKV3NzWWxSamxUakY1cW5JRlo3N1RNWktVS0tiREpIelFTcDltckhXRFppa0ZObm1TM1Z0eVQ5ZkNBOFFaR3Z2Y2F4ZCt0ditodFJoRXphc3JGdFJEY2FpL1ptWmNtV2VDWGFOTzBxZ3VockJORUc2cWtZcFlYWmJLMGlQWUcvUWRPeXQvY21nRUFBQT09In0= -->
-<div data-pagedtable="false">
-<script data-pagedtable-source type="application/json">
-{"columns":[{"label":["text"],"name":[1],"type":["chr"],"align":["left"]}],"data":[],"options":{"columns":{"min":{},"max":[10],"total":[1]},"rows":{"min":[10],"max":[10],"total":["NA"]},"pages":{}}}
-  </script>
+
+<!-- rnb-html-begin eyJtZXRhZGF0YSI6eyJjbGFzc2VzIjpbInNoaW55LnRhZyJdLCJzaXppbmdQb2xpY3kiOltdfX0= -->
+
+<div id="igyninnhnw" style="overflow-x:auto;overflow-y:auto;width:auto;height:auto;">
+  <style>html {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', 'Fira Sans', 'Droid Sans', Arial, sans-serif;
+}
+
+#igyninnhnw .gt_table {
+  display: table;
+  border-collapse: collapse;
+  margin-left: auto;
+  margin-right: auto;
+  color: #333333;
+  font-size: 16px;
+  font-weight: normal;
+  font-style: normal;
+  background-color: #FFFFFF;
+  width: auto;
+  border-top-style: solid;
+  border-top-width: 2px;
+  border-top-color: #A8A8A8;
+  border-right-style: none;
+  border-right-width: 2px;
+  border-right-color: #D3D3D3;
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #A8A8A8;
+  border-left-style: none;
+  border-left-width: 2px;
+  border-left-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_heading {
+  background-color: #FFFFFF;
+  text-align: center;
+  border-bottom-color: #FFFFFF;
+  border-left-style: none;
+  border-left-width: 1px;
+  border-left-color: #D3D3D3;
+  border-right-style: none;
+  border-right-width: 1px;
+  border-right-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_title {
+  color: #333333;
+  font-size: 125%;
+  font-weight: initial;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  padding-left: 5px;
+  padding-right: 5px;
+  border-bottom-color: #FFFFFF;
+  border-bottom-width: 0;
+}
+
+#igyninnhnw .gt_subtitle {
+  color: #333333;
+  font-size: 85%;
+  font-weight: initial;
+  padding-top: 0;
+  padding-bottom: 6px;
+  padding-left: 5px;
+  padding-right: 5px;
+  border-top-color: #FFFFFF;
+  border-top-width: 0;
+}
+
+#igyninnhnw .gt_bottom_border {
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_col_headings {
+  border-top-style: solid;
+  border-top-width: 2px;
+  border-top-color: #D3D3D3;
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+  border-left-style: none;
+  border-left-width: 1px;
+  border-left-color: #D3D3D3;
+  border-right-style: none;
+  border-right-width: 1px;
+  border-right-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_col_heading {
+  color: #333333;
+  background-color: #FFFFFF;
+  font-size: 100%;
+  font-weight: normal;
+  text-transform: inherit;
+  border-left-style: none;
+  border-left-width: 1px;
+  border-left-color: #D3D3D3;
+  border-right-style: none;
+  border-right-width: 1px;
+  border-right-color: #D3D3D3;
+  vertical-align: bottom;
+  padding-top: 5px;
+  padding-bottom: 6px;
+  padding-left: 5px;
+  padding-right: 5px;
+  overflow-x: hidden;
+}
+
+#igyninnhnw .gt_column_spanner_outer {
+  color: #333333;
+  background-color: #FFFFFF;
+  font-size: 100%;
+  font-weight: normal;
+  text-transform: inherit;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+#igyninnhnw .gt_column_spanner_outer:first-child {
+  padding-left: 0;
+}
+
+#igyninnhnw .gt_column_spanner_outer:last-child {
+  padding-right: 0;
+}
+
+#igyninnhnw .gt_column_spanner {
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+  vertical-align: bottom;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  overflow-x: hidden;
+  display: inline-block;
+  width: 100%;
+}
+
+#igyninnhnw .gt_group_heading {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-left: 5px;
+  padding-right: 5px;
+  color: #333333;
+  background-color: #FFFFFF;
+  font-size: 100%;
+  font-weight: initial;
+  text-transform: inherit;
+  border-top-style: solid;
+  border-top-width: 2px;
+  border-top-color: #D3D3D3;
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+  border-left-style: none;
+  border-left-width: 1px;
+  border-left-color: #D3D3D3;
+  border-right-style: none;
+  border-right-width: 1px;
+  border-right-color: #D3D3D3;
+  vertical-align: middle;
+}
+
+#igyninnhnw .gt_empty_group_heading {
+  padding: 0.5px;
+  color: #333333;
+  background-color: #FFFFFF;
+  font-size: 100%;
+  font-weight: initial;
+  border-top-style: solid;
+  border-top-width: 2px;
+  border-top-color: #D3D3D3;
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+  vertical-align: middle;
+}
+
+#igyninnhnw .gt_from_md > :first-child {
+  margin-top: 0;
+}
+
+#igyninnhnw .gt_from_md > :last-child {
+  margin-bottom: 0;
+}
+
+#igyninnhnw .gt_row {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-left: 5px;
+  padding-right: 5px;
+  margin: 10px;
+  border-top-style: solid;
+  border-top-width: 1px;
+  border-top-color: #D3D3D3;
+  border-left-style: none;
+  border-left-width: 1px;
+  border-left-color: #D3D3D3;
+  border-right-style: none;
+  border-right-width: 1px;
+  border-right-color: #D3D3D3;
+  vertical-align: middle;
+  overflow-x: hidden;
+}
+
+#igyninnhnw .gt_stub {
+  color: #333333;
+  background-color: #FFFFFF;
+  font-size: 100%;
+  font-weight: initial;
+  text-transform: inherit;
+  border-right-style: solid;
+  border-right-width: 2px;
+  border-right-color: #D3D3D3;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+#igyninnhnw .gt_stub_row_group {
+  color: #333333;
+  background-color: #FFFFFF;
+  font-size: 100%;
+  font-weight: initial;
+  text-transform: inherit;
+  border-right-style: solid;
+  border-right-width: 2px;
+  border-right-color: #D3D3D3;
+  padding-left: 5px;
+  padding-right: 5px;
+  vertical-align: top;
+}
+
+#igyninnhnw .gt_row_group_first td {
+  border-top-width: 2px;
+}
+
+#igyninnhnw .gt_summary_row {
+  color: #333333;
+  background-color: #FFFFFF;
+  text-transform: inherit;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+#igyninnhnw .gt_first_summary_row {
+  border-top-style: solid;
+  border-top-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_first_summary_row.thick {
+  border-top-width: 2px;
+}
+
+#igyninnhnw .gt_last_summary_row {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-left: 5px;
+  padding-right: 5px;
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_grand_summary_row {
+  color: #333333;
+  background-color: #FFFFFF;
+  text-transform: inherit;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+#igyninnhnw .gt_first_grand_summary_row {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-left: 5px;
+  padding-right: 5px;
+  border-top-style: double;
+  border-top-width: 6px;
+  border-top-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_striped {
+  background-color: rgba(128, 128, 128, 0.05);
+}
+
+#igyninnhnw .gt_table_body {
+  border-top-style: solid;
+  border-top-width: 2px;
+  border-top-color: #D3D3D3;
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_footnotes {
+  color: #333333;
+  background-color: #FFFFFF;
+  border-bottom-style: none;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+  border-left-style: none;
+  border-left-width: 2px;
+  border-left-color: #D3D3D3;
+  border-right-style: none;
+  border-right-width: 2px;
+  border-right-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_footnote {
+  margin: 0px;
+  font-size: 90%;
+  padding-left: 4px;
+  padding-right: 4px;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+#igyninnhnw .gt_sourcenotes {
+  color: #333333;
+  background-color: #FFFFFF;
+  border-bottom-style: none;
+  border-bottom-width: 2px;
+  border-bottom-color: #D3D3D3;
+  border-left-style: none;
+  border-left-width: 2px;
+  border-left-color: #D3D3D3;
+  border-right-style: none;
+  border-right-width: 2px;
+  border-right-color: #D3D3D3;
+}
+
+#igyninnhnw .gt_sourcenote {
+  font-size: 90%;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+#igyninnhnw .gt_left {
+  text-align: left;
+}
+
+#igyninnhnw .gt_center {
+  text-align: center;
+}
+
+#igyninnhnw .gt_right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#igyninnhnw .gt_font_normal {
+  font-weight: normal;
+}
+
+#igyninnhnw .gt_font_bold {
+  font-weight: bold;
+}
+
+#igyninnhnw .gt_font_italic {
+  font-style: italic;
+}
+
+#igyninnhnw .gt_super {
+  font-size: 65%;
+}
+
+#igyninnhnw .gt_two_val_uncert {
+  display: inline-block;
+  line-height: 1em;
+  text-align: right;
+  font-size: 60%;
+  vertical-align: -0.25em;
+  margin-left: 0.1em;
+}
+
+#igyninnhnw .gt_footnote_marks {
+  font-style: italic;
+  font-weight: normal;
+  font-size: 75%;
+  vertical-align: 0.4em;
+}
+
+#igyninnhnw .gt_asterisk {
+  font-size: 100%;
+  vertical-align: 0;
+}
+
+#igyninnhnw .gt_slash_mark {
+  font-size: 0.7em;
+  line-height: 0.7em;
+  vertical-align: 0.15em;
+}
+
+#igyninnhnw .gt_fraction_numerator {
+  font-size: 0.6em;
+  line-height: 0.6em;
+  vertical-align: 0.45em;
+}
+
+#igyninnhnw .gt_fraction_denominator {
+  font-size: 0.6em;
+  line-height: 0.6em;
+  vertical-align: -0.05em;
+}
+</style>
+  <table class="gt_table">
+  
+  <thead class="gt_col_headings">
+    <tr>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1225501300789477377</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1484375202427543552</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">647567168167636992</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1488225320121651202</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1488162322187182085</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1303426769127698432</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1486846468887560201</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1486772334635536395</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1488660359422648320</th>
+      <th class="gt_col_heading gt_columns_bottom_border gt_left" rowspan="1" colspan="1">1485693066736402434</th>
+    </tr>
+  </thead>
+  <tbody class="gt_table_body">
+    <tr><td class="gt_row gt_left">The name &quot;England&quot; is derived from the Old English name Englaland, which means &quot;land of the Angles&quot;. The Angles were one of the Germanic tribes that settled in Great Britain during the Early Middle Ages. So in effect, England means land of a German tribe.</td>
+<td class="gt_row gt_left">🧡 ENHYPEN SIGNED ALBUM GIVEAWAY 🧡
+
+Engene! Mimin mau GIVEAWAY SIGNED ALBUM ENHYPEN, DIMENSION: ANSWER nih! Caranya:
+
+1. FOLLOW @ShopeeID 
+2. RT &amp;amp; LIKE tweet ini
+3. REPLY #ENHYPENdiSHOPEE YANG BANYAK! 😆
+
+Pemenang dipilih acak &amp;amp; diumumkan 25 Januari 2022. https://twitter.com/ShopeeID/status/1484375202427543552/photo/1</td>
+<td class="gt_row gt_left">&quot;Jamesy?...&quot;</td>
+<td class="gt_row gt_left">I know this pandemic is frustrating. It’s frustrating that, after two years, we’re not done fighting COVID-19. But over the past few days, Canadians have been shocked – and, frankly, disgusted – by the behaviour displayed by some people protesting in our nation’s capital.</td>
+<td class="gt_row gt_left">This morning, I tested positive for COVID-19. I’m feeling fine – and I’ll continue to work remotely this week while following public health guidelines. Everyone, please get vaccinated and get boosted.</td>
+<td class="gt_row gt_left">@MilitaryStart4
+@LLDMim
+@Chubbs172
+@UNICORNPOOP99
+@SPICYMOOSEBALLS
+@ToddHassinger11
+@HeARTofGod99
+@gnarlyballs
+@GODISBACK5
+@GeishaJin
+@SmomMan
+@ltc_mim
+@colonel_light
+@Espo11Michael
+@THUNDERBOOM111
+@Helicallight21
+@LIGHTNINGBOOM1
+@RealDonaldTrump
+@VP
+@GenFlynn
+@FBI
+@CIA
+@NSAGov</td>
+<td class="gt_row gt_left">If you scare people enough, they will demand removal of freedom. This is the path to tyranny.</td>
+<td class="gt_row gt_left">Canadian truckers rule</td>
+<td class="gt_row gt_left">Today in the House, Members of Parliament unanimously condemned the antisemitism, Islamophobia, anti-Black racism, homophobia, and transphobia that we’ve seen on display in Ottawa over the past number of days. Together, let’s keep working to make Canada more inclusive.</td>
+<td class="gt_row gt_left">Ahead of his show at the Walt Disney Concert Hall, Damon Albarn discusses his dual citizenship, the impending 25th anniversary of Blur’s self-titled 1997 LP and the legacy of the band’s biggest American hit, “Song 2.” https://www.latimes.com/entertainment-arts/music/story/2022-01-23/damon-albarn-blur-gorillaz</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville What’s your point James? Yes, we know Britain is a ‘Heinz 57’ variety. We’re leaving the EU, not planet Earth!</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@HisProtegee Yeah?</td>
+<td class="gt_row gt_left">@JustinTrudeau Imagine someone that has repeatedly done blackface calling a peaceful protest racist LOL. The hypocrisy is hilarious.</td>
+<td class="gt_row gt_left">@JustinTrudeau Get well soon Prime Minister</td>
+<td class="gt_row gt_left">@NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov PINIC
+I WILL LIKE AND retwatt every minute if I have to 
+359
+MAGNUM https://twitter.com/toddhassinger11/status/1322629543795052549/photo/1</td>
+<td class="gt_row gt_left">@elonmusk sounds like a mandate</td>
+<td class="gt_row gt_left">@elonmusk #bitgert @elonmusk</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/supercazzola773/status/1488660542055227392/photo/1</td>
+<td class="gt_row gt_left">Albarn also spills his thoughts on some of today&#39;s chart-topping music artists.
+
+Billie Eilish?
+&quot;I think she’s exceptional.&quot;
+Taylor Swift?
+&quot;She doesn’t write her own songs.&quot;
+https://www.latimes.com/entertainment-arts/music/story/2022-01-23/damon-albarn-blur-gorillaz</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Just as the English language is actually derived from a German dialect.</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE #ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE #ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE #ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE #ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE #ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE #ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE #ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing &quot;I need a cuddle...&quot;</td>
+<td class="gt_row gt_left">@JustinTrudeau WRONG-  freedom is not negotiable</td>
+<td class="gt_row gt_left">@JustinTrudeau Get better soon!</td>
+<td class="gt_row gt_left">@NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov OH HOW [they] hate this too
+I have to like and retwatt every time https://twitter.com/NoVaseline4you/status/1303426769127698432</td>
+<td class="gt_row gt_left">@elonmusk 100 percent true!</td>
+<td class="gt_row gt_left">@elonmusk What I’ve seen was direct from the creator of MicroStrategy! https://twitter.com/LucilleParr/status/1486772447349194752/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau Yet your party blocked a motion to condemn blackface? Curious
+HONK HONK HONK HONK HONK HONK HONK HONK HONK HONK HONK HONK HONK</td>
+<td class="gt_row gt_left">Read the full exchange between @mikaelwood and Damon Albarn ➡️ https://www.latimes.com/entertainment-arts/music/story/2022-01-23/damon-albarn-blur-gorillaz https://twitter.com/latimes/status/1485729749972385793/photo/1</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Yes may i remind you also the Normans ( vikings) invaded 1066.  It was a ruthless invasion killing all opposition and to this day they still own 80 percent of the land</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@HisProtegee /Just/ a cuddle?</td>
+<td class="gt_row gt_left">@JustinTrudeau Intolerant and anti-science segregationist. You are the minority.</td>
+<td class="gt_row gt_left">@JustinTrudeau Thank God your triple vaxxed can we get on with our lives please?</td>
+<td class="gt_row gt_left">@NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov I LOVE THIS TEAM
+752
+77
+ALL 7’s https://twitter.com/NoVaseline4you/status/1303426769127698432</td>
+<td class="gt_row gt_left">@elonmusk https://twitter.com/ThatCryptoFool1/status/1486846627017023489/photo/1</td>
+<td class="gt_row gt_left">@elonmusk Dumbass.</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/dinges733/status/1488660508282699778/photo/1</td>
+<td class="gt_row gt_left">And describes his sort of love-hate relationship with England.
+
+&quot;England’s my home. However infuriating it is and however dumb the policies are, I am English.&quot; https://www.latimes.com/entertainment-arts/music/story/2022-01-23/damon-albarn-blur-gorillaz https://twitter.com/latimes/status/1485693071270440963/photo/1</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville And before that it was these guys here https://twitter.com/emotionalmammal/status/1225507709526642689/photo/1</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing &quot;I...yeah. Is that okay? I just need you to hold me right now...&quot;</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/KevinFCurry8091/status/1488225526649085953/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau Hopefully your not feeling so good that’s karma</td>
+<td class="gt_row gt_left">@NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov Hey [twitter] what do WE have to relike and retwatt this 
+EVERY DAY?</td>
+<td class="gt_row gt_left">@elonmusk https://twitter.com/BrownsCavsCats/status/1486846600848809992/photo/1</td>
+<td class="gt_row gt_left">@elonmusk musk</td>
+<td class="gt_row gt_left">@JustinTrudeau Are you High?? That&#39;s all made up bullshit.</td>
+<td class="gt_row gt_left">“Blur” turns 25 next month, but Albarn says he has no plans to mark the album’s anniversary.
+
+&quot;I want nothing to do with any of it. Reissuing stuff that’s already had its moment is taking up space.&quot; https://www.latimes.com/entertainment-arts/music/story/2022-01-23/damon-albarn-blur-gorillaz</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville @schutzer9  time to wise up again I think BB</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE
+
+2</td>
+<td class="gt_row gt_left">@HisProtegee Yeah.. My lap is free? *He winks at her* Feel free.. Come and cuddle me up..</td>
+<td class="gt_row gt_left">@JustinTrudeau HONK HONK HONK HONK HONK</td>
+<td class="gt_row gt_left">@JustinTrudeau Eat 💩💩💩💩💩</td>
+<td class="gt_row gt_left">@NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov Hey [twatter] why do WE are [you] removing our likes and retwatts every day?
+https://twitter.com/NoVaseline4you/status/1303426769127698432?s=20</td>
+<td class="gt_row gt_left">@elonmusk dude, fuck off.</td>
+<td class="gt_row gt_left">@elonmusk Looking for a better way to make friends when wearamask? Join free app Bost to easily and safely connect with new friends nearby. Download for free at Apple https://apps.apple.com/us/app/bost-app/id1478516141?ls=1 &amp;amp; Google https://play.google.com/store/apps/details?id=com.boropost.application https://twitter.com/bost_app/status/1486772420308574209/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau RESIGN!!!!!!!!</td>
+<td class="gt_row gt_left">@latimes Go Home!</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Don&#39;t tell the Brexit fuckwits they descend from Germanic tribes or, God forbid, anything French. They&#39;re not comfortable with facts and they&#39;ll be burning history books faster than you can say Oberammergau; especially the dangerous books... the ones without pictures.</td>
+<td class="gt_row gt_left">@ShopeeID wish me luckk #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing She smiles softly and sits down on his lap, curling up against him as her arms wrap around him and she presses her face -</td>
+<td class="gt_row gt_left">@JustinTrudeau I&#39;m disgusted you are the Prime Minister of Canada.</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/DontCareAboutAF/status/1488162510184271878/photo/1</td>
+<td class="gt_row gt_left">Somebody else reply to above twatt, only giving ME option to add more singular twatts</td>
+<td class="gt_row gt_left">@elonmusk Unfortunately it is like that</td>
+<td class="gt_row gt_left">@elonmusk What about Canadian bacon</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/GarcettiTyga/status/1488660434928418816/photo/1</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville And 3 lions on the shirt is a Norman ( French ) sigil</td>
+<td class="gt_row gt_left">@ShopeeID Yakin gue g menang</td>
+<td class="gt_row gt_left">@JamesYourKing -against his chest, letting out a shaky sigh.</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/FRINGEMlNORITY/status/1488225514942828549/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau It’s the clown man https://twitter.com/TheHoboBaptist/status/1488162499643985920/photo/1</td>
+<td class="gt_row gt_left">@toddhassinger11 @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov 😂❤️ https://twitter.com/toddhassinger11/status/1322346209349128193</td>
+<td class="gt_row gt_left">@elonmusk Elon muskateer take us to mars already m8</td>
+<td class="gt_row gt_left">@elonmusk #GREENCHARTbsc 💚🍀💚</td>
+<td class="gt_row gt_left">@JustinTrudeau That one guy? Where are you seeing this???</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Lala land right enough 😜</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE AYO MIN PICK ME!!!! NNTI AKU KAYANG DI DEPAN KOMPLEK WKWKWKWK</td>
+<td class="gt_row gt_left">@HisProtegee So what&#39;s the matter, babe? *He kisses her cheek and smiles softly* Something you want to tell me?</td>
+<td class="gt_row gt_left">@JustinTrudeau What is this then? https://twitter.com/thatsgouveia/status/1488225470609039365/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau Wishing you a swift recovery.</td>
+<td class="gt_row gt_left">@toddhassinger11 @NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov Hi Todd♥️🤗
+LOVE YOU♥️
+https://twitter.com/toddhassinger11/status/1328501406559563776?s=20</td>
+<td class="gt_row gt_left">@elonmusk Buy my club pls</td>
+<td class="gt_row gt_left">@elonmusk @DogediToken</td>
+<td class="gt_row gt_left">@JustinTrudeau Bullshit</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Not to mean the German royalty</td>
+<td class="gt_row gt_left">@ShopeeID wish me luck #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing &quot;No...I just...I need a hug.&quot; She says in a high pitched voice as tears start filling her eyes.</td>
+<td class="gt_row gt_left">@JustinTrudeau What pandemic? https://twitter.com/Nogreatreset1/status/1488225534647705601/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau Boosted and still testing positive 😂😂</td>
+<td class="gt_row gt_left">@toddhassinger11 @NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov follower https://twitter.com/LIGHTNINGBOOM1/status/1322346863807418368/photo/1</td>
+<td class="gt_row gt_left">@elonmusk Where’s doge?</td>
+<td class="gt_row gt_left">@elonmusk اص انت</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/FRINGEMlNORITY/status/1488660571520131076/photo/1</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville @kat_cary So that&#39;s why Mr Davis says the German car manufacturers are going to virtually pay us to take their cars so we can have an EU trade deal. We&#39;re all family.</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE
+
+3</td>
+<td class="gt_row gt_left">@HisProtegee Why..? What&#39;s wrong. If you think I can&#39;t tell when you&#39;re upset by now.. Then you&#39;re the stupid one.</td>
+<td class="gt_row gt_left">@JustinTrudeau You are frustrating</td>
+<td class="gt_row gt_left">@JustinTrudeau Did you also test positive for being a bitch?</td>
+<td class="gt_row gt_left">@THUNDERBOOM111 @NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @Helicallight21 @LIGHTNINGBOOM1 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov Hi Catherine 
+LOVE YOU ❤️🤗 https://twitter.com/THUNDERBOOM111/status/1328502080294809601</td>
+<td class="gt_row gt_left">@elonmusk Have no fear!</td>
+<td class="gt_row gt_left">@elonmusk Hi Musk</td>
+<td class="gt_row gt_left">@JustinTrudeau Can it coward of the cottage</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Isn’t Englaland a recent, popular musical film staring @BorisJohnson and @theresa_may ? #LALALAND</td>
+<td class="gt_row gt_left">@ShopeeID yuk bisa yuk kali aja ditengok shopee
+
+#ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE
+#ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing &quot;I honestly don&#39;t know...but I&#39;ve been feeling like shit lately...could be my stupid period.&quot; She snorts.</td>
+<td class="gt_row gt_left">@JustinTrudeau Honk honk honk + ratio you dumb communist + Castro was your father</td>
+<td class="gt_row gt_left">@JustinTrudeau Wishing you and your entire family a speedy recovery.</td>
+<td class="gt_row gt_left">@LIGHTNINGBOOM1 @NoVaseline4you @MilitaryStart4 @LLDMim @chubbs172 @UNICORNPOOP99 @SPICYMOOSEBALLS @HeARTofGod99 @gnarlyballs @GODISBACK5 @GeishaJin @SmomMan @ltc_mim @colonel_light @Espo11Michael @THUNDERBOOM111 @Helicallight21 @realDonaldTrump @VP @GenFlynn @FBI @CIA @NSAGov Sync https://twitter.com/LIGHTNINGBOOM1/status/1322346863807418368</td>
+<td class="gt_row gt_left">@elonmusk While the BNB is growing🔜🌙
+ https://www.youtube.com/watch?v=Qr9UlwnhlKQ&amp;feature=youtu.be</td>
+<td class="gt_row gt_left">@elonmusk Canada is a good place.</td>
+<td class="gt_row gt_left">@JustinTrudeau Wow you are actually the biggest racist in Canada. There isn&#39;t any racism happening in Ottawa right now except from you.</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville @FergusonPhilip Are you using Twitter to make notes for your history GCSE?</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE
+
+1</td>
+<td class="gt_row gt_left">@HisProtegee Yeah... Are you on now? *He strokes her thighs* You don&#39;t feel too good do you?</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/CrossReverse/status/1488225451822784516/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau Take care of yourself PM. Hope it passes quickly.</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk Expose it all Elon. PLEEEEEASSE.</td>
+<td class="gt_row gt_left">@elonmusk Craft Crypto Color is presenting its Mandala Art #10.
+ 
+#handmade  #nftart #NFTCommunity #NFT #Polygon #Matic
+Website: https://craftcryptocolor.com
+Buy or Bid Now:
+https://opensea.io/assets/matic/0x2953399124f0cbb46d2cbacd8a89cf0599974963/3193112739521353744625184375807498389545391542490467369915987283172640423937/
+
+Place a bid:
+https://rarible.com/token/0xc9154424B823b10579895cCBE442d41b9Abd96Ed:3193112739521353744625184375807498389545391542490467369915987268878989262861</td>
+<td class="gt_row gt_left">@JustinTrudeau Here, humanity is facing the oppression, they want to stop the voices of refugees, not to let the cry of justice be heard, not to speak of their more than 20 years of oppression, not to let them cry out in pain. Refugee life in hell !
+Please resettle us from Kyrgyzstan ! 🆘 https://twitter.com/riwix0/status/1488660441492602884/photo/1</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Yes and lots of Viking genes in the mix too, plus of course the French Norman invaders amongst others. And this great genetic mix has always been a great strength of this little country.</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing &quot;Yeah...I am...and my tummy hurts and all I want to do is stay in bed all day...&quot; she murmurs. &quot;Sorry...&quot; she sighs.</td>
+<td class="gt_row gt_left">I want to be very clear: We’re not intimidated by those who hurl abuse at small business workers and steal food from the homeless. We won’t give in to those who fly racist flags. And we won’t cave to those who engage in vandalism, or dishonour the memory of our veterans.</td>
+<td class="gt_row gt_left">@JustinTrudeau @CameronAhmad #liar 
+#CowardOfTheCottage</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk Fearmongering works great on simple minds.</td>
+<td class="gt_row gt_left">@elonmusk https://twitter.com/Geolobo12/status/1486737112749772806?s=20</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/covid____1984/status/1488425534358913029?s=21</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville And Scotland is land of a Northern Irish tribe!</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE
+
+4</td>
+<td class="gt_row gt_left">@HisProtegee Don&#39;t be sorry, beautiful... *He strokes her hair and kisses her cheek* I love you to bits... I love you so much..</td>
+<td class="gt_row gt_left">@JustinTrudeau You know damned well those are not protesters but planted PROVOCATEURS...whether instructed by you or your minions is another matter...don&#39;t try that old chestnut, its been done already.</td>
+<td class="gt_row gt_left">@JustinTrudeau Stay safe PMJT. 🙏🙏</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk Then let’s oppose tyranny whenever we encounter it.</td>
+<td class="gt_row gt_left">@elonmusk This NET is much cuter https://twitter.com/PigeonProject1/status/1486772492916203521/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau If you think that&#39;s the main concern you really need to get your head outta your ass..</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville I love telling those who say I&#39;m an Anglo-Saxon that my Dad&#39;s family came from South Yorkshire /North Lincolnshire - the land of tha Angles and my Mum&#39;s from Saxony in Germany. They hate it.</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing &quot;I love you too...&quot; she whispers, moving her head to lean up and peck his lips.</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/FRINGEMlNORITY/status/1488225492100685829/photo/1</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/jackravager/status/1488162460636880900/photo/1</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk Omg first</td>
+<td class="gt_row gt_left">@elonmusk Romanian stole ruls</td>
+<td class="gt_row gt_left">@JustinTrudeau LIAR.
+You will pay</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville So  that will explain the obsession  with German cars shoes and supermarkets then!</td>
+<td class="gt_row gt_left">@ShopeeID aku menang sih fix #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@HisProtegee *He looks up at her and pulls her in for a close cuddle* Tell you what, you go and get some blankets and I&#39;ll make it up -</td>
+<td class="gt_row gt_left">@JustinTrudeau Only a fringe minority have</td>
+<td class="gt_row gt_left">@JustinTrudeau Who you calling racist? https://twitter.com/pipelinebandit/status/1488162436930752514/photo/1</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk AGREE!!</td>
+<td class="gt_row gt_left">@elonmusk So does Neil Young.</td>
+<td class="gt_row gt_left">@JustinTrudeau Your party refused to condemn blackface 
+Was that your idea?</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville And, even then, it wasn&#39;t a single, united entity. That didn&#39;t really even start until after the Normans decided to come visit.</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@HisProtegee -nice and cosy.. and get you a hot water bottle.. We&#39;ll have a movie day okay?..</td>
+<td class="gt_row gt_left">@JustinTrudeau HONKHONK</td>
+<td class="gt_row gt_left">@JustinTrudeau I’m good thanks
+No experimental gene therapy for me https://twitter.com/COVID____1984/status/1488162515355766785/photo/1</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk Fds, ngm liga 👍🏽</td>
+<td class="gt_row gt_left">@elonmusk Elon, have you seen that?? Crazy Russian made a copy of the Starship and sent it to Mars!! :D
+https://www.youtube.com/watch?v=Dp4iQN-1MKQ&amp;t=576s</td>
+<td class="gt_row gt_left">@JustinTrudeau Lol and then you spoke up and said you wouldn&#39;t condemn black face bahahaha your such a joke</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville I also believe that the Scottish term ‘Sasanach’ derives from ‘Saxon‘ another tribe/group from northern Germany.</td>
+<td class="gt_row gt_left">@ShopeeID bismillah dulu wish me luck #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing Her lips curl up into a smile as she nods excitedly. &quot;Yeah...that sounds perfect, baby...thank you so much..That&#39;s exactly -</td>
+<td class="gt_row gt_left">@JustinTrudeau Lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies lies</td>
+<td class="gt_row gt_left">@JustinTrudeau Pussy</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk You&#39;re the man !</td>
+<td class="gt_row gt_left">@elonmusk thank you</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/Day171Won/status/1488660445250699265/photo/1</td>
+<td class="gt_row gt_left">NA</td></tr>
+    <tr><td class="gt_row gt_left">@JamesMelville Land of a German tribe is it? Would have loved to see you put that one past Alfred.</td>
+<td class="gt_row gt_left">@ShopeeID #ENHYPENdiSHOPEE</td>
+<td class="gt_row gt_left">@JamesYourKing -what I need right now.&quot;</td>
+<td class="gt_row gt_left">@JustinTrudeau https://youtu.be/jXXemtKz-Oo</td>
+<td class="gt_row gt_left">@JustinTrudeau https://twitter.com/HodlAlabama/status/1488162508330479618/photo/1</td>
+<td class="gt_row gt_left">NA</td>
+<td class="gt_row gt_left">@elonmusk Yes 🇨🇦</td>
+<td class="gt_row gt_left">@elonmusk When Indian truckers rule??</td>
+<td class="gt_row gt_left">@JustinTrudeau Come home justin we’re worried sick</td>
+<td class="gt_row gt_left">NA</td></tr>
+  </tbody>
+  
+  
+</table>
 </div>
-<!-- rnb-frame-end -->
+
+
+<!-- rnb-html-end -->
+
 <!-- rnb-chunk-end -->
 <!-- rnb-text-begin -->
 <!-- rnb-text-end -->
 </div>
 
-<div id="rmd-source-code">LS0tCnRpdGxlOiAiQ29udm95IGFuYWx5c2lzIgphdXRob3I6ICJFZXR1IE3DpGtlbMOkIgpkYXRlOiAiYHIgU3lzLkRhdGUoKWAiCm91dHB1dDogCiAgaHRtbF9ub3RlYm9vazoKICAgIGNvZGVfZm9sZGluZzogaGlkZQogICAgdG9jOiB5ZXMKLS0tCgojIFNldHVwCgpgYGB7ciBzZXR1cCxpbmNsdWRlPUZBTFNFfQprbml0cjo6b3B0c19rbml0JHNldChyb290LmRpciA9IGhlcmU6OmhlcmUoKSkKbGlicmFyeShoZXJlKQpzb3VyY2UoaGVyZSgiY29kZS9jb21tb25fYmFzaXMuUiIpLCBsb2NhbCA9IGtuaXRyOjprbml0X2dsb2JhbCgpKQoKbGlicmFyeShnbHVlKQpsaWJyYXJ5KHRpZHl2ZXJzZSkKbGlicmFyeShsdWJyaWRhdGUpCmxpYnJhcnkoaG1zKQpsaWJyYXJ5KGdnYmVlc3dhcm0pCmxpYnJhcnkocGFrKQpwa2dfaW5zdGFsbCgiaHNjaS1yL2dnaHNjaSIpCmxpYnJhcnkoZ2doc2NpKQpsaWJyYXJ5KGd0KQoKcCA8LSBmdW5jdGlvbihudW1iZXIpIHsKICByZXR1cm4oZm9ybWF0KG51bWJlciwgc2NpZW50aWZpYyA9IEZBTFNFLCBiaWcubWFyayA9ICIsIikpCn0KcHAgPC0gZnVuY3Rpb24ocGVyY2VudGFnZSxhY2N1cmFjeT0wLjAxKSB7CiAgcmV0dXJuKHNjYWxlczo6cGVyY2VudChwZXJjZW50YWdlLCBhY2N1cmFjeSA9IGFjY3VyYWN5KSkKfQpgYGAKCiMgR2VuZXJhbCBhbmFseXNpcwoKYGBge3J9CnR3ZWV0c19jICU+JQogIGNvdW50KG9yaWdpbmFsLG5hbWU9InR3ZWV0cyIpICU+JQogIG11dGF0ZShvcmlnaW5hbD1pZl9lbHNlKG9yaWdpbmFsPT0xLCJvcmlnaW5hbCBzYW1wbGUiLCJleHBhbmRlZCBkaXNjdXNzaW9uIikpICU+JQogIGd0KHJvd25hbWVfY29sID0gIm9yaWdpbmFsIikgJT4lCiAgZm10X2ludGVnZXIodHdlZXRzKSAlPiUKICBzdW1tYXJ5X3Jvd3MoY29sdW1ucz10d2VldHMsIGZucz1saXN0KHRvdGFsPSJzdW0iKSkKYGBgCgojIyBPdmVyYWxsIHRlbXBvcmFsIG91dGxvb2sgKG5vdGUgbG9nYXJpdGhtaWMgeS1zY2FsZSkKYGBge3J9CnR3ZWV0c19jICU+JQogIGNvdW50KHllYXJfY3JlYXRlZF9hdCxtb250aF9jcmVhdGVkX2F0KSAlPiUgCiAgbXV0YXRlKHR5cGU9InR3ZWV0cyIpICU+JQogIGNvbGxlY3QoKSAlPiUKICBiaW5kX3Jvd3MoCiAgICB0d2VldHNfYyAlPiUgCiAgICAgIGZpbHRlcihjb252ZXJzYXRpb25faWQ9PXR3ZWV0X2lkKSAlPiUKICAgICAgY291bnQoeWVhcl9jcmVhdGVkX2F0LG1vbnRoX2NyZWF0ZWRfYXQpICU+JSAKICAgICAgbXV0YXRlKHR5cGU9ImNvbnZlcnNhdGlvbnMiKSAlPiUKICAgICAgY29sbGVjdCgpCiAgKSAlPiUKICBtdXRhdGUoZGF0ZT1tYWtlX2RhdGUoeWVhcl9jcmVhdGVkX2F0LG1vbnRoX2NyZWF0ZWRfYXQpKSAlPiUKICBnZ3Bsb3QoYWVzKHg9ZGF0ZSx5PW4sY29sb3I9dHlwZSkpICsKICBnZW9tX2xpbmUoKSArCiAgdGhlbWVfaHNjaV9kaXNjcmV0ZSgpICsgCiAgc2NhbGVfeV9sb2cxMChsYWJlbHM9c2NhbGVzOjpjb21tYSkgKwogIGxhYnMoY29sb3I9TlVMTCkgKwogIHNjYWxlX3hfZGF0ZShkYXRlX2JyZWFrcz0iMiB5ZWFycyIsZGF0ZV9sYWJlbHMgPSAiJVkiKQpgYGAKCk92ZXJhbGwsIG91ciBkYXRhIGhhcyB0aGUgbW9zdCBjb252ZXJzYXRpb25zIGFuZCB0d2VldHMgaW4gdGhlIHBlcmlvZCBmcm9tIHdoaWNoIHRoZSBzZWVkIHR3ZWV0cyB3ZXJlIGdhdGhlcmVkIGZyb20sIGJ1dCBpbnRlcmVzdGluZ2x5LCB0aGVyZSBhcmUgYWxzbyBtdWx0aXBsZSBkaXNjdXNzaW9ucyB0aGF0IGhhdmUgZ29uZSBvbiBmb3IgbXVjaCBsb25nZXIuIFBhcnRpY3VsYXJseSBpbnRlcmVzdGluZyBpcyB0aGUgaHVnZSBzcGlrZSBpbiB0d2VldHMgb3JpZ2luYXRpbmcgZnJvbSAyMDE2IGFuZCBzdGlsbCBjb250aW51aW5nLCB0byB3aGljaCB0aGUgY29udm95LXR3ZWV0cyBnZXQgYXR0YWNoZWQgdG8uCgojIEZyZWVkb20gY29udm95IC1wZXJpb2QgKGZpcnN0IHR3byB3ZWVrcykKCiMjIFRvdGFsIHR3ZWV0cyBpbiBvcmlnaW5hbCBzYW1wbGUKCmBgYHtyfQp0d2VldHNfYyAlPiUgCiAgZmlsdGVyKG9yaWdpbmFsLGNyZWF0ZWRfYXQ+PWFzLkRhdGUoIjIwMjItMDEtMjIiKSxjcmVhdGVkX2F0PGFzLkRhdGUoIjIwMjItMDItMDUiKSkgJT4lCiAgbXV0YXRlKGRhdGU9ZGF0ZShjcmVhdGVkX2F0KSkgJT4lCiAgZ3JvdXBfYnkoZGF0ZSkgJT4lCiAgc3VtbWFyaXplKGBzYW1wbGUgdHdlZXRzYD1uKCksIGBzYW1wbGUgbm9uLXJldHdlZXRzYD1zdW0oaXMubmEocmV0d2VldF9vZikpLCBjb252ZXJzYXRpb25zPW5fZGlzdGluY3QoY29udmVyc2F0aW9uX2lkKSwgYHVyLWNvbnZlcnNhdGlvbnNgPW5fZGlzdGluY3QodXJfY29udmVyc2F0aW9uX2lkKSwuZ3JvdXBzPSJkcm9wIikgJT4lCiAgY29sbGVjdCgpICU+JQogIHBpdm90X2xvbmdlcihgc2FtcGxlIHR3ZWV0c2A6YHVyLWNvbnZlcnNhdGlvbnNgKSAlPiUKICBiaW5kX3Jvd3MoCiAgICB0d2VldHNfYyAlPiUgCiAgICAgIGZpbHRlcihvcmlnaW5hbCxjcmVhdGVkX2F0Pj1hcy5EYXRlKCIyMDIyLTAxLTIyIiksY3JlYXRlZF9hdDxhcy5EYXRlKCIyMDIyLTAyLTA1IikpICU+JQogICAgICBkaXN0aW5jdCh1cl9jb252ZXJzYXRpb25faWQpICU+JQogICAgICBsZWZ0X2pvaW4odHdlZXRzX2MsYnk9YygidXJfY29udmVyc2F0aW9uX2lkIikpICU+JQogICAgICBmaWx0ZXIoY3JlYXRlZF9hdD49YXMuRGF0ZSgiMjAyMi0wMS0yMiIpLGNyZWF0ZWRfYXQ8YXMuRGF0ZSgiMjAyMi0wMi0wNSIpKSAlPiUKICAgICAgbXV0YXRlKGRhdGU9ZGF0ZShjcmVhdGVkX2F0KSkgJT4lCiAgICAgIGdyb3VwX2J5KGRhdGUpICU+JQogICAgICBzdW1tYXJpemUoYHRvdGFsIHR3ZWV0cyBpbiB1ci1jb252ZXJzYXRpb25zYD1uKCksIGBub24tcmV0d2VldHMgaW4gdXItY29udmVyc2F0aW9uc2A9c3VtKGlzLm5hKHJldHdlZXRfb2YpKSkgJT4lCiAgICAgIGNvbGxlY3QoKSAlPiUKICAgICAgcGl2b3RfbG9uZ2VyKGB0b3RhbCB0d2VldHMgaW4gdXItY29udmVyc2F0aW9uc2A6YG5vbi1yZXR3ZWV0cyBpbiB1ci1jb252ZXJzYXRpb25zYCkKICApICU+JQogIGdncGxvdChhZXMoeD1kYXRlLHk9dmFsdWUsY29sb3I9bmFtZSkpICsKICBnZW9tX3N0ZXAoKSArCiAgdGhlbWVfaHNjaV9kaXNjcmV0ZSgpICsKICBzY2FsZV95X2NvbnRpbnVvdXMobGFiZWxzPXNjYWxlczo6Y29tbWEpICsKICBsYWJzKGNvbG9yPU5VTEwpICsKICB5bGFiKCJOIikKYGBgCgojIyBEaXNjdXNzaW9uIGxlbmd0aCBwb3dlci1sYXcKCmBgYHtyfQp0d2VldHNfYyAlPiUKICBjb3VudChjb252ZXJzYXRpb25faWQpICU+JQogIGdncGxvdChhZXMoeD1uKSkgKwogIGdlb21faGlzdG9ncmFtKGJpbnM9MTAwKSArCiAgc2NhbGVfeV9sb2cxMChsYWJlbHM9c2NhbGVzOjpjb21tYSkgKwogIHNjYWxlX3hfbG9nMTAobGFiZWxzPXNjYWxlczo6Y29tbWEpICsKICB0aGVtZV9oc2NpX2Rpc2NyZXRlKCkgKwogIHlsYWIoIk51bWJlciBvZiBkaXNjdXNzaW9ucyIpICsKICB4bGFiKCJUd2VldHMgaW4gZGlzY3Vzc2lvbiIpCiAKYGBgCgpBIHR5cGljYWwgcG93ZXItbGF3IHJlbGF0aW9uc2hpcDogdGhlcmUgYXJlIGEgZ3JlYXQgbWFueSBkaXNjdXNzaW9ucyB3aXRoIG9ubHkgYSBmZXcgcmVwbGllcywgYW5kIHZlcnkgZmV3IGRpc2N1c3Npb25zIHRoYXQgZ28gb24gZm9yZXZlcgoKIyMgUmV0d2VldC9yZXBseSBjb3VudCByZWxhdGlvbnNoaXAKCmBgYHtyfQp0d2VldHNfYyAlPiUgbXV0YXRlKAogIHJ0X2Jpbj1mbG9vcihsb2cyKHJldHdlZXRfY291bnQpKSwKICByZXBseV9iaW49Zmxvb3IobG9nMihyZXBseV9jb3VudCkpCikgJT4lIAogIHJlcGxhY2VfbmEobGlzdChydF9iaW49MCxyZXBseV9iaW49MCkpICU+JQogIGNvdW50KHJ0X2JpbixyZXBseV9iaW4pICU+JQogIG11dGF0ZShuX2Jpbj1mbG9vcihsb2cyKG4pKSkgJT4lCiAgZ2dwbG90KGFlcyh4PXJ0X2Jpbix5PXJlcGx5X2JpbixmaWxsPW5fYmluKSkgKwogIGdlb21fcmFzdGVyKCkgKwogIHNjYWxlX3hfY29udGludW91cyhsYWJlbHM9fnNjYWxlczo6Y29tbWEoMl4uKSkgKwogIHNjYWxlX3lfY29udGludW91cyhsYWJlbHM9fnNjYWxlczo6Y29tbWEoMl4uKSkgKwogIHRoZW1lX2hzY2koKSArCiAgc2NhbGVfZmlsbF92aXJpZGlzX2MobGFiZWxzPX5zY2FsZXM6OmNvbW1hKDJeLikpICsKICB4bGFiKCJSZXR3ZWV0cyIpICsKICB5bGFiKCJSZXBsaWVzIikgKwogIGxhYnMoZmlsbD0iVHdlZXRzIikKYGBgCgpJdCBpcyBxdWl0ZSBwb3NzaWJsZSBmb3IgYSB0d2VldCB0byBnYXJuZXIgYSBodWdlIG51bWJlciBvZiByZXR3ZWV0cyB3aXRob3V0IHNwYXJraW5nIGFueSBkaXNjdXNzaW9uLiBUaGUgb3Bwb3NpdGUgaXMgbXVjaCBsZXNzIGxpa2VseS4gQXBhcnQgZnJvbSB0aGlzLCB0aGUgbnVtYmVyIG9mIHJldHdlZXRzIGFuZCByZXBsaWVzIGlzIGNvcnJlbGF0ZWQuCgojIFNvbWUgbGFyZ2UgY29udmVyc2F0aW9ucwoKYGBge3J9CmQgPC0gdXJfY29udmVyc2F0aW9uc19jICU+JSAKICBhcnJhbmdlKGRlc2ModWNfdXJfZGVzY2VuZGFudHMpKSAlPiUgCiAgaGVhZCg3KSAlPiUKICBzZWxlY3QodXJfY29udmVyc2F0aW9uX2lkKSAlPiUKICBsZWZ0X2pvaW4odHdlZXRzX2MsYnk9YygidXJfY29udmVyc2F0aW9uX2lkIikpICU+JQogIG11dGF0ZSh5ZWFyPXllYXIoY3JlYXRlZF9hdCksbW9udGg9bW9udGgoY3JlYXRlZF9hdCkpICU+JQogIGdyb3VwX2J5KHVyX2NvbnZlcnNhdGlvbl9pZCx5ZWFyLG1vbnRoKSAlPiUgCiAgbXV0YXRlKHVyX2NvbnZlcnNhdGlvbl9pZD1hcy5jaGFyYWN0ZXIodXJfY29udmVyc2F0aW9uX2lkKSkgJT4lCiAgc3VtbWFyaXplKG49bigpLGF1dGhvcnM9bl9kaXN0aW5jdChhdXRob3JfaWQpLC5ncm91cHM9ImRyb3AiKSAlPiUKICBjb2xsZWN0KCkgJT4lCiAgbXV0YXRlKGRhdGU9bWFrZV9kYXRlKHllYXIsbW9udGgpKSAKZCAlPiUKICBnZ3Bsb3QoYWVzKHg9ZGF0ZSx5PW4sY29sb3I9dXJfY29udmVyc2F0aW9uX2lkKSkgKwogIGdlb21fc3RlcCgpICsKICB0aGVtZV9oc2NpX2Rpc2NyZXRlKCkKZCAlPiUKICBnZ3Bsb3QoYWVzKHg9ZGF0ZSx5PWF1dGhvcnMsY29sb3I9dXJfY29udmVyc2F0aW9uX2lkKSkgKwogIGdlb21fc3RlcCgpICsKICB0aGVtZV9oc2NpX2Rpc2NyZXRlKCkKYGBgCgpgYGB7cn0KdXJfY29udmVyc2F0aW9uc19jICU+JSAKICBhcnJhbmdlKGRlc2ModWNfdXJfZGVzY2VuZGFudHMpKSAlPiUgCiAgaGVhZCgxMCkgJT4lCiAgc2VsZWN0KHVyX2NvbnZlcnNhdGlvbl9pZCx1Y191cl9kZXNjZW5kYW50cyx1cl9kZXNjZW5kYW50cyx1cl9tZWFuX3JlcGx5X2NvdW50LHVyX21lYW5fcmV0d2VldF9jb3VudCkgJT4lCiAgbGVmdF9qb2luKHR3ZWV0c19jICU+JSBzZWxlY3QodXJfY29udmVyc2F0aW9uX2lkLGF1dGhvcl9pZCksYnk9YygidXJfY29udmVyc2F0aW9uX2lkIikpICU+JQogIGdyb3VwX2J5KHVyX2NvbnZlcnNhdGlvbl9pZCx1Y191cl9kZXNjZW5kYW50cyx1cl9kZXNjZW5kYW50cyx1cl9tZWFuX3JlcGx5X2NvdW50LHVyX21lYW5fcmV0d2VldF9jb3VudCkgJT4lCiAgc3VtbWFyaXplKGF1dGhvcnM9bl9kaXN0aW5jdChhdXRob3JfaWQpLC5ncm91cHM9ImRyb3AiKSAlPiUKICBtdXRhdGUodXJfY29udmVyc2F0aW9uX2lkPXN0cl9jKCJbIix1cl9jb252ZXJzYXRpb25faWQsIl0oaHR0cHM6Ly90d2l0dGVyLmNvbS9hL3N0YXR1cy8iLHVyX2NvbnZlcnNhdGlvbl9pZCwiKSIpKSAlPiUKICBhcnJhbmdlKGRlc2ModWNfdXJfZGVzY2VuZGFudHMpKSAlPiUKICBjb2xsZWN0KCkgJT4lCiAgcmVsb2NhdGUoYXV0aG9ycywuYWZ0ZXI9dXJfZGVzY2VuZGFudHMpICU+JQogIGd0KCkgJT4lCiAgZm10X21hcmtkb3duKHVyX2NvbnZlcnNhdGlvbl9pZCkgJT4lCiAgZm10X2ludGVnZXIodWNfdXJfZGVzY2VuZGFudHM6YXV0aG9ycykgJT4lCiAgZm10X251bWJlcih1cl9tZWFuX3JlcGx5X2NvdW50OnVyX21lYW5fcmV0d2VldF9jb3VudCkKYGBgCgoKYGBge3J9CmRlc2NlbmRhbnRzIDwtIGZ1bmN0aW9uKHR3ZWV0X2lkKSB7IAogIHRibChjb24sc3FsKGdsdWUoIldJVEggUkVDVVJTSVZFIGRlc2NlbmRhbnRzIEFTICggU0VMRUNUIHQudHdlZXRfaWQsdC5pbl9yZXBseV90byBGUk9NIHR3ZWV0c19hIHQgV0hFUkUgdHdlZXRfaWQ9e3R3ZWV0X2lkfSBVTklPTiBTRUxFQ1QgdC50d2VldF9pZCx0LmluX3JlcGx5X3RvIEZST00gdHdlZXRzX2EgdCwgZGVzY2VuZGFudHMgZCBXSEVSRSB0LmluX3JlcGx5X3RvPWQudHdlZXRfaWQgKSBTRUxFQ1QgKiBGUk9NIGRlc2NlbmRhbnRzIikpKSAKfQpkZXNjZW5kYW50cygiNjQ3NTY3MTY4MTY3NjM2OTkyIikgJT4lIGhlYWQoMTApICU+JSBzZWxlY3QodHdlZXRfaWQpICU+JSBsZWZ0X2pvaW4odHdlZXRzX2EsYnk9YygidHdlZXRfaWQiKSkgJT4lIHNlbGVjdCh0ZXh0KQpgYGAKCg==</div>
+<div id="rmd-source-code">LS0tCnRpdGxlOiAiQ29udm95IGFuYWx5c2lzIgphdXRob3I6ICJFZXR1IE3DpGtlbMOkIgpkYXRlOiAiYHIgU3lzLkRhdGUoKWAiCm91dHB1dDogCiAgaHRtbF9ub3RlYm9vazoKICAgIGNvZGVfZm9sZGluZzogaGlkZQogICAgdG9jOiB5ZXMKLS0tCgpgYGB7ciBzZXR1cCxpbmNsdWRlPUZBTFNFfQprbml0cjo6b3B0c19rbml0JHNldChyb290LmRpciA9IGhlcmU6OmhlcmUoKSkKbGlicmFyeShoZXJlKQpzb3VyY2UoaGVyZSgiY29kZS9jb21tb25fYmFzaXMuUiIpLCBsb2NhbCA9IGtuaXRyOjprbml0X2dsb2JhbCgpKQoKbGlicmFyeShnbHVlKQpsaWJyYXJ5KHRpZHl2ZXJzZSkKbGlicmFyeShsdWJyaWRhdGUpCmxpYnJhcnkoaG1zKQpsaWJyYXJ5KGdnYmVlc3dhcm0pCmxpYnJhcnkocGFrKQpwa2dfaW5zdGFsbCgiaHNjaS1yL2dnaHNjaSIpCmxpYnJhcnkoZ2doc2NpKQpsaWJyYXJ5KGd0KQoKcCA8LSBmdW5jdGlvbihudW1iZXIpIHsKICByZXR1cm4oZm9ybWF0KG51bWJlciwgc2NpZW50aWZpYyA9IEZBTFNFLCBiaWcubWFyayA9ICIsIikpCn0KcHAgPC0gZnVuY3Rpb24ocGVyY2VudGFnZSxhY2N1cmFjeT0wLjAxKSB7CiAgcmV0dXJuKHNjYWxlczo6cGVyY2VudChwZXJjZW50YWdlLCBhY2N1cmFjeSA9IGFjY3VyYWN5KSkKfQpgYGAKCiMgR2VuZXJhbCBhbmFseXNpcwoKYGBge3J9CnR3ZWV0c19jICU+JQogIGNvdW50KG9yaWdpbmFsLG5hbWU9InR3ZWV0cyIpICU+JQogIG11dGF0ZShvcmlnaW5hbD1pZl9lbHNlKG9yaWdpbmFsPT0xLCJvcmlnaW5hbCBzYW1wbGUiLCJleHBhbmRlZCBkaXNjdXNzaW9uIikpICU+JQogIGd0KHJvd25hbWVfY29sID0gIm9yaWdpbmFsIikgJT4lCiAgZm10X2ludGVnZXIodHdlZXRzKSAlPiUKICBzdW1tYXJ5X3Jvd3MoY29sdW1ucz10d2VldHMsIGZucz1saXN0KHRvdGFsPSJzdW0iKSkKYGBgCgojIyBSYXcgYWNjZXNzIHRvIHRoZSB0d2VldCBkYXRhCgpUaGUgdHdlZXRzIGFyZSBzdG9yZWQgaW4gYSBNYXJpYURCIChNeVNRTCkgZGF0YWJhc2UgY2FsbGVkIGBjb252b3lgIG9uIGhvc3QgYHZtMTc4OC5rYWoucG91dGEuY3NjLmZpYC4gVGhlIHVzZXJuYW1lIGZvciB0aGUgZGF0YWJhc2UgaXMgYGNvbnZveWAuIFRoZSBwYXNzd29yZCBpcyBnaXZlbiBzZXBhcmF0ZWx5LiAqKkRPIE5PVCBJTkNMVURFIFRIRSBQQVNTV09SRCBJTiBBTlkgQ09ERSBZT1UgQ09NTUlUIFRPIEdJVEhVQioqLiBJZiBydW5uaW5nIHRoaXMgbm90ZWJvb2ssIGl0IHdpbGwgYXNrIGZvciB0aGUgcGFzc3dvcmQgdGhlIGZpcnN0IHRpbWUgeW91IHJ1biBpdCwgYW5kIHRoZW4gc3RvcmUgaXQgc2VwYXJhdGVseSBpbiB5b3VyIGtleXJpbmcuCgpPdXIgcmF3IGRhdGEgaXMgYm90aCBsYXJnZSBhbmQgY29tcGxleC4gV2l0aCBzdWNoIGRhdGEsIG9uZSBjYW5ub3QgdW5mb3J0dW5hdGVseSBhbHdheXMganVzdCB1c2UgYSBkZWZhdWx0IGRhdGFiYXNlIGNvbmZpZ3VyYXRpb24gYW5kIHRydXN0IHRoYXQgaXQgZG9lcyB0aGUgcmlnaHQgdGhpbmcuIFRoZXJlZm9yZSwgaGVyZSBhcmUgc29tZSBkZXRhaWxzOgoKICogVGhlIGRhdGEgaGFzIGJlZW4gbG9hZGVkIGludG8gYm90aCBBcmlhIGFzIHdlbGwgYXMgQ29sdW1uU3RvcmUgdGFibGVzLiBBcmlhIHRhYmxlcyBoYXZlIGEgc3VmZml4IG9mIGBfYWAgYW5kIENvbHVtblN0b3JlIHRhYmxlcyBhIHN1ZmZpeCBvZiBgX2NgLiAKICogR2VuZXJhbGx5LCBDb2x1bW5TdG9yZSB0YWJsZXMgc2hvdWxkIGJlIG1vcmUgcGVyZm9ybWFudCBmb3IgdGhlIHR5cGVzIG9mIGFuYWx5dGljYWwgcXVlcmllcyB3ZSBhcmUgcGVyZm9ybWluZywgc28gdXNlIHRob3NlIGFzIGEgZGVmYXVsdC4gCiAqIEhvd2V2ZXIsIGZvciBjZXJ0YWluIHF1ZXJpZXMgKGF0IGxlYXN0IGluY2x1ZGluZyBVTklPTiBBTEwpLCB0aGUgQ29sdW1uU3RvcmUgZG9lcyB3ZWlyZCB0aGluZ3MgYW5kIGlzIGJvZyBzbG93LiBGb3IgdGhvc2UsIHRoZSBgX2FgIHZhcmlhbnRzIG1heSBwZXJmb3JtIGJldHRlci4KICogVGhlIENvbHVtblN0b3JlIGRvZXMgbm90IHN1cHBvcnQgYFdJVEggUkVDVVJTSVZFYCBxdWVyaWVzIHVzZWZ1bCBmb3IgdGhyZWFkIGFuYWx5c2lzLiBUaGVyZWZvcmUsIHRoZXNlIGhhdmUgdG8gYmUgY29tcHV0ZWQgdXNpbmcgQXJpYSBgX2FgIHRhYmxlcy4KICogTWl4aW5nIHRoZSB0d28gdHlwZXMgb2YgdGFibGVzIHNob3VsZCBvZnRlbiBsZWFkIHRvIHdvcnNlIHBlcmZvcm1hbmNlIChidXQgbWF5IG5vdCkKICAgClRoZSBkYXRhYmFzZSBzdHJ1Y3R1cmUgaXMgYXMgZm9sbG93czoKCiAqIGB0d2VldHNfW2F8Y11gIGlzIHRoZSBtYWluIHRhYmxlIGhvbGRpbmcgdGhlIHR3ZWV0cyBhcyB3ZWxsIGFzIHRoZWlyIHN0YXRpc3RpY3MuCiAqIGB1c2Vyc19bYXxjXWAgY29udGFpbnMgdXNlciBpbmZvcm1hdGlvbi4gSXQgaXMgbGlua2VkIGZyb20gYHR3ZWV0c2AgYnkgYGF1dGhvcl9pZGAgYW5kIGBpbl9yZXBseV90b191c2VyX2lkYC4KICogYHR3ZWV0X21lbnRpb25zX1thfGNdYCBsaW5rcyBgdHdlZXRfaWRgcyB0byBgdXNlcl9pZGBzIHRoZXkgbWVudGlvbi4KICogYHR3ZWV0X2hhc2h0YWdzX1thfGNdYCBsaW5rcyBgdHdlZXRfaWRgcyB0byB0aGUgaGFzaHRhZ3MgdGhleSBjb250YWluLgogKiBgdHdlZXRfdXJsc19bYXxjXWAgbGlua3MgYHR3ZWV0X2lkYHMgdG8gdGhlIHVybHMgdGhleSBjb250YWluLgogKiBgY29udmVyc2F0aW9uc19bYXxjXWAgY29udGFpbnMgY29udmVyc2F0aW9uLWxldmVsIGluZm8gYW5kIHN0YXRzIGZvciBlYWNoIGBjb252ZXJzYXRpb25faWRgLgogKiBgdXJfY29udmVyc2F0aW9uc19bYXxjXWAgY29udGFpbnMgdXItY29udmVyc2F0aW9uLWxldmVsIGluZm8gYW5kIHN0YXRzIGZvciBlYWNoIGB1cl9jb252ZXJzYXRpb25faWRgLgogCkluIHRoZSBhYm92ZSwgYSAqY29udmVyc2F0aW9uKiBpcyBhIHRocmVhZCBsaW5rZWQgYnkgYGluX3JlcGx5X3RvYCBsaW5rcy4gSW4gdGhpcyB2aWV3LCB3aGVuZXZlciB5b3UgcmV0d2VldCBhIHR3ZWV0IG9yIHF1b3RlLXR3ZWV0IGl0LCB5b3UgYXJlIHN0YXJ0aW5nIGEgbmV3LCBkaXN0aW5jdCBjb252ZXJzdGFpb24gaW5zdGVhZCBvZiBjb250aW51aW5nIGFuIGV4aXN0aW5nIG9uZS4gVGhpcyBpcyB3aGF0IHRoZSBUd2l0dGVyIEFQSSBkZWVtcyBhIGNvbnZlcnNhdGlvbiBhbmQgd2hhdCB0aGVpciBVSSBhbHNvIGdlbmVyYWxseSBzaG93cywgc28gYSBnb29kIHZpZXcgd2hlbiBleGFtaW5pbmcgY29udmVyc2F0aW9ucyBmcm9tIGEgdXNlcidzIHBlcnNwZWN0aXZlLiBIb3dldmVyLCB3aGVuIGxvb2tpbmcgYXQgYSBjb252ZXJzYXRpb24gaW4gYWdncmVnYXRlLCBvbmUgbWF5IGFsc28gd2FudCB0byBsb29rIGF0ICphbGwqIGNvbnZlcnNhdGlvbiBzcGFya2VkIGJ5IHNvbWUgbWVzc2FnZSwgYW5kIGluY2x1ZGUgZG93bnN0cmVhbSBjb252ZXJzYXRpb25zIHN0YXJ0ZWQgZnJvbSByZXR3ZWV0cyBhbmQgcXVvdGVzIGFzIHdlbGwuIEZvciB0aGlzLCBvdXIgZGF0YSBhbHNvIGluY2x1ZGVzIGFuIGB1cl9jb252ZXJzYXRpb25faWRgLCB3aGljaCBqb2lucyB0b2dldGhlciBhbGwgdHdlZXRzIGluIHNvbWUgd2F5IHJlbGF0ZWQgdG8gYSBzaW5nbGUgc3RhcnRlciBvciBpdHMgZGVzY2VuZGFudHMsIHdoZXRoZXIgdGhlcmUgYXJlIHJldHdlZXRzIG9yIHF1b3RlLXR3ZWV0cyBpbiB0aGUgbWlkZGxlIG9mIHRoYXQgY2hhaW4gb3Igbm90LgoKSG93ZXZlciwgdGhlcmUgaXMgYXJlIHR3byBpbXBvcnRhbnQgY2F2ZWF0cyBoZXJlOgoKIDEuIFdoZW4gdHdlZXRzL3VzZXJzIGdldCBkZWxldGVkIGJ5IHR3aXR0ZXIsIGl0IGJyZWFrcyB0aGUgY29udmVyc2F0aW9uIGNoYWluIHVwd2FyZHMgZnJvbSB0aGUgZGVsZXRlZCB0d2VldC4gVGhpcyBhZmZlY3RzIGJvdGggdXItY29udmVyc2F0aW9uIHJlc29sdXRpb24gYXMgd2VsbCBhcyBjYWxjdWxhdGluZyBjb252ZXJzYXRpb24gc3RhdGlzdGljcy4KIDEuIEl0IGlzIHBvc3NpYmxlIGZvciBhIHR3ZWV0IHRvIGJlIGJvdGggYSByZXBseSB0byBhIHR3ZWV0IGFzIHdlbGwgYXMgcXVvdGUgYW5vdGhlciB0d2VldC4gRm9yIHNpbXBsaWNpdHkgaW4gdGhpcyBoYWNrYXRob24gKGZvciB0aGUgY29udmVyc2F0aW9ucyB0byByZW1haW4gY2xlYW4gdHJlZXMgaW5zdGVhZCBvZiBwb3NzaWJseSBjeWNsaWNhbCBEQUdzKSwgaW4gc3VjaCBzaXR1YXRpb25zIHRoZSB0d2VldCBoYXMgKipvbmx5KiogYmVlbiBhc3NvY2lhdGVkIHdpdGggdGhlIHVyLWNvbnZlcnNhdGlvbiB0byB3aGljaCBpdCByZXBsaWVzLgogCiMjIFN0YXRpc3RpY3MgZm9yIGNvbnZlcnNhdGlvbnMgYW5kIHVyLWNvbnZlcnNhdGlvbnMKClRoZSBmb2xsb3dpbmcgc3RhdGlzdGljcyBoYXZlIGJlZW4gY2FsY3VsYXRlZCBmb3IgY29udmVyc2F0aW9ucyBhbmQgdXItY29udmVyc2F0aW9ucywgYW5kIGFyZSBhdmFpbGFibGUgaW4gdGhlIGB0d2VldHNfW2F8Y11gIHRhYmxlIChyZW1lbWJlciB0aGF0IHJlbW92ZWQgdHdlZXRzIGNhbiBjYXVzZSBwcm9ibGVtcyBmb3IgbW9zdCBvZiB0aGVzZSk6CgogKiBgY2hpbGRyZW5gOiB0aGUgbnVtYmVyIG9mIHJlcGxpZXMgdG8gdGhpcyB0d2VldAogKiBgdXJfY2hpbGRyZW5gOiB0aGUgbnVtYmVyIG9mIHJldHdlZXRzIGFuZCBxdW90ZXMgb2YsIGFuZCByZXBsaWVzIHRvIHRoaXMgdHdlZXQKICogYGRlc2NlbmRhbnRzYDogdGhlIHRvdGFsIG51bWJlciBvZiB0d2VldHMgYWZ0ZXIgdGhpcyBvbmUgaW4gdGhlIGNvbnZlcnNhdGlvbgogKiBgdXJfZGVzY2VuZGFudHNgOiB0aGUgdG90YWwgbnVtYmVyIG9mIHR3ZWV0cyBhZnRlciB0aGlzIG9uZSBpbiB0aGUgdXItY29udmVyc2F0aW9uCiAqIGBsZWFmX2Rlc2NlbmRhbnRzYDogdGhlIHRvdGFsIG51bWJlciBvZiBsZWFmIHR3ZWV0cyAodHdlZXRzIHdpdGhvdXQgZnVydGhlciByZXBsaWVzKSBpbiB0aGUgY29udmVyc2F0aW9uIChhIG1lYXN1cmUgb2YgY29udmVyc2F0aW9uICJicmVhZHRoIikKICogYHVyX2xlYWZfZGVzY2VuZGFudHNgOiB0aGUgdG90YWwgbnVtYmVyIG9mIGxlYWYgdHdlZXRzICh0d2VldHMgd2l0aG91dCBmdXJ0aGVyIHJlcGxpZXMpIGluIHRoZSB1ci1jb252ZXJzYXRpb24gKGEgbWVhc3VyZSBvZiB1ci1jb252ZXJzYXRpb24gImJyZWFkdGgiKQogKiBgbWF4X2RlcHRoYDogdGhlIG1heGltdW0gbGVuZ3RoIHJlcGx5IGNoYWluIGRpc2NvdmVyZWQgYmVsb3cgdGhpcyB0d2VldAogKiBgdXJfbWF4X2RlcHRoYDogdGhlIG1heGltdW0gbGVuZ3RoIHJlcGx5L3JldHdlZXQvcXVvdGUgY2hhaW4gZGlzY292ZXJlZCBiZWxvdyB0aGlzIHR3ZWV0CiAqIGB0X2F1dGhvcnNgOiB0aGUgdG90YWwgdHJhbnNpdGl2ZSBhbW91bnQgb2YgYXV0aG9ycyBwYXJ0aWNpcGF0aW5nIGluIHRoZSBjb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGB1cl90X2F1dGhvcnNgOiB0aGUgdG90YWwgdHJhbnNpdGl2ZSBhbW91bnQgb2YgYXV0aG9ycyBwYXJ0aWNpcGF0aW5nIGluIHRoZSB1ci1jb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGB0X3JlcGx5X2NvdW50YDogdGhlIHRvdGFsIHRyYW5zaXRpdmUgcmVwbHkgY291bnQgb2YgdGhlIGNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQgKHNob3VsZCBiZSBhYm91dCBlcXVhbCB0byBgZGVzY2VuZGFudHNgIGlmIHRoZXJlIGFyZSBub3QgdG9vIG1hbnkgbWlzc2luZyB0d2VldHMpCiAqIGB1cl90X3JlcGx5X2NvdW50YDogdGhlIHRvdGFsIHRyYW5zaXRpdmUgcmVwbHkgY291bnQgb2YgdGhlIHVyLWNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYHRfcXVvdGVfY291bnRgOiB0aGUgdG90YWwgdHJhbnNpdGl2ZSBxdW90ZSBjb3VudCBvZiB0aGUgY29udmVyc2F0aW9uIGJyYW5jaGluZyBkb3duIGZyb20gdGhpcyB0d2VldAogKiBgdXJfdF9xdW90ZV9jb3VudGA6IHRoZSB0b3RhbCB0cmFuc2l0aXZlIHF1b3RlIGNvdW50IG9mIHRoZSB1ci1jb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGB0X2xpa2VfY291bnRgOiB0aGUgdG90YWwgdHJhbnNpdGl2ZSBsaWtlIGNvdW50IG9mIHRoZSBjb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGB1cl90X2xpa2VfY291bnRgOiB0aGUgdG90YWwgdHJhbnNpdGl2ZSBsaWtlIGNvdW50IG9mIHRoZSB1ci1jb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGB0X3JldHdlZXRfY291bnRgOiB0aGUgdG90YWwgdHJhbnNpdGl2ZSByZXR3ZWV0IGNvdW50IG9mIHRoZSBjb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGB1cl90X3JldHdlZXRfY291bnRgOiB0aGUgdG90YWwgdHJhbnNpdGl2ZSByZXR3ZWV0IGNvdW50IG9mIHRoZSB1ci1jb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGBicmFuY2hpbmdfZmFjdG9yYDogdGhlIGJyYW5jaGluZyBmYWN0b3Igb2YgdGhlIGNvbnZlcnNhdGlvbiB0cmVlLCBvciB0aGUgbWVhbiBudW1iZXIgb2YgcmVwbGllcyBmb3IgZWFjaCB0d2VldCB0aGF0IGhhcyByZXBsaWVzCiAqIGB1cl9icmFuY2hpbmdfZmFjdG9yYDogdGhlIGJyYW5jaGluZyBmYWN0b3Igb2YgdGhlIHVyLWNvbnZlcnNhdGlvbiB0cmVlLCBvciB0aGUgbWVhbiBudW1iZXIgb2YgcmVwbGllcytxdW90ZXMrcmV0d2VldHMgZm9yIGVhY2ggdHdlZXQgdGhhdCBoYXMgdGhlbQogKiBgbWVhbl9kZXB0aGA6IHRoZSBtZWFuIGRlcHRoIG9mIGNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYGRlcHRoX21hZGA6IHRoZSBtZWFuIGFic29sdXRlIGRldmlhdGlvbiAoYSBtZWFzdXJlIG9mIHZhcmlhbmNlKSBmcm9tIHRoZSBtZWFuIGNvbnZlcnNhdGlvbiBkZXB0aAogKiBgdXJfbWVhbl9kZXB0aGA6IHRoZSBtZWFuIGRlcHRoIG9mIHVyLWNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYHVyX2RlcHRoX21hZGA6IHRoZSBtZWFuIGFic29sdXRlIGRldmlhdGlvbiAoYSBtZWFzdXJlIG9mIHZhcmlhbmNlKSBmcm9tIHRoZSBtZWFuIHVyLWNvbnZlcnNhdGlvbiBkZXB0aAogKiBgbWVhbl9yZXBseV9jb3VudGA6IHRoZSBtZWFuIGNvdW50IG9mIHJlcGxpZXMgZm9yIGVhY2ggdHdlZXQgaW4gdGhlIGNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYHJlcGx5X2NvdW50X21hZGA6IHRoZSBtZWFuIGFic29sdXRlIGRldmlhdGlvbiAoYSBtZWFzdXJlIG9mIHZhcmlhbmNlKSBmcm9tIHRoZSBtZWFuIHJlcGx5IGNvdW50CiAqIGB1cl9tZWFuX3JlcGx5X2NvdW50YDogdGhlIG1lYW4gY291bnQgb2YgcmVwbGllcyBmb3IgZWFjaCB0d2VldCBpbiB0aGUgdXItY29udmVyc2F0aW9uIGJyYW5jaGluZyBkb3duIGZyb20gdGhpcyB0d2VldAogKiBgdXJfcmVwbHlfY291bnRfbWFkYDogdGhlIG1lYW4gYWJzb2x1dGUgZGV2aWF0aW9uIChhIG1lYXN1cmUgb2YgdmFyaWFuY2UpIGZyb20gdGhlIG1lYW4gdXItY29udmVyc2F0aW9uIHJlcGx5IGNvdW50CiAqIGBtZWFuX3F1b3RlX2NvdW50YDogdGhlIG1lYW4gY291bnQgb2YgcXVvdGF0aW9ucyBvZiBlYWNoIHR3ZWV0IGluIHRoZSBjb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGBxdW90ZV9jb3VudF9tYWRgOiB0aGUgbWVhbiBhYnNvbHV0ZSBkZXZpYXRpb24gKGEgbWVhc3VyZSBvZiB2YXJpYW5jZSkgZnJvbSB0aGUgbWVhbiBxdW90YXRpb24gY291bnQKICogYHVyX21lYW5fcXVvdGVfY291bnRgOiB0aGUgbWVhbiBjb3VudCBvZiBxdW90YXRpb25zIG9mIGVhY2ggdHdlZXQgaW4gdGhlIHVyLWNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYHVyX3F1b3RlX2NvdW50X21hZGA6IHRoZSBtZWFuIGFic29sdXRlIGRldmlhdGlvbiAoYSBtZWFzdXJlIG9mIHZhcmlhbmNlKSBmcm9tIHRoZSBtZWFuIHVyLWNvbnZlcnNhdGlvbiBxdW90YXRpb24gY291bnQKICogYG1lYW5fbGlrZV9jb3VudGA6IHRoZSBtZWFuIGNvdW50IG9mIGxpa2VzIG9mIGVhY2ggdHdlZXQgaW4gdGhlIGNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYGxpa2VfY291bnRfbWFkYDogdGhlIG1lYW4gYWJzb2x1dGUgZGV2aWF0aW9uIChhIG1lYXN1cmUgb2YgdmFyaWFuY2UpIGZyb20gdGhlIG1lYW4gY29udmVyc2F0aW9uIGxpa2UgY291bnQKICogYHVyX21lYW5fbGlrZV9jb3VudGA6IHRoZSBtZWFuIGNvdW50IG9mIGxpa2VzIG9mIGVhY2ggdHdlZXQgaW4gdGhlIHVyLWNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYHVyX2xpa2VfY291bnRfbWFkYDogdGhlIG1lYW4gYWJzb2x1dGUgZGV2aWF0aW9uIChhIG1lYXN1cmUgb2YgdmFyaWFuY2UpIGZyb20gdGhlIG1lYW4gdXItY29udmVyc2F0aW9uIGxpa2UgY291bnQKICogYG1lYW5fcmV0d2VldF9jb3VudGA6IHRoZSBtZWFuIGNvdW50IG9mIHJldHdlZXRzIG9mIGVhY2ggdHdlZXQgaW4gdGhlIGNvbnZlcnNhdGlvbiBicmFuY2hpbmcgZG93biBmcm9tIHRoaXMgdHdlZXQKICogYHJldHdlZXRgX2NvdW50X21hZGA6IHRoZSBtZWFuIGFic29sdXRlIGRldmlhdGlvbiAoYSBtZWFzdXJlIG9mIHZhcmlhbmNlKSBmcm9tIHRoZSBtZWFuIGNvbnZlcnNhdGlvbiByZXR3ZWV0IGNvdW50CiAqIGB1cl9tZWFuX3JldHdlZXRfY291bnRgOiB0aGUgbWVhbiBjb3VudCBvZiByZXR3ZWV0cyBvZiBlYWNoIHR3ZWV0IGluIHRoZSB1ci1jb252ZXJzYXRpb24gYnJhbmNoaW5nIGRvd24gZnJvbSB0aGlzIHR3ZWV0CiAqIGB1cl9yZXR3ZWV0X2NvdW50X21hZGA6IHRoZSBtZWFuIGFic29sdXRlIGRldmlhdGlvbiAoYSBtZWFzdXJlIG9mIHZhcmlhbmNlKSBmcm9tIHRoZSBtZWFuIHVyLWNvbnZlcnNhdGlvbiByZXR3ZWV0IGNvdW50CgojIyBVc2luZyB0aGUgZGF0YSBpbnNpZGUgUgoKVHdlZXQsIGNvbnZlcnNhdGlvbiwgdXItY29udmVyc2F0aW9uIGFuZCB1c2VyIGlkcyBhcmUgYWxsIGBCSUdJTlRgcyBvciA2NGJpdCBpbnRlZ2VycyBpbiB0aGUgZGF0YWJhc2UuIFIgdXN1YWxseSBoYW5kbGVzIG51bWJlcnMgaW4gdGhlc2UgcmFuZ2VzIGFzIGRvdWJsZXMsIHdoaWNoIGlzIHByb2JsZW1hdGljIGluIHRoZSBjYXNlIG9mIGlkcyBkdWUgdG8gbG9zcyBvZiBwcmVjaXNpb24gKGZvciBleGFtcGxlLCBgciBiaXQ2NDo6YXMuaW50ZWdlcjY0LmNoYXJhY3RlcigiMTQ4ODk1MjY5ODc5NTk2MjM3MiIpYCBiZWNvbWVzIGFjdHVhbGx5IGByIGFzLmNoYXJhY3RlcigxNDg4OTUyNjk4Nzk1OTYyMzcyKWApLiBUbyBhY2NvdW50IGZvciBzdWNoIHNpdHVhdGlvbnMsIFIgaW5jbHVkZXMgYW4gYGludGVnZXI2NGAgZGF0YSB0eXBlLiBIb3dldmVyLCBpdCBkb2VzIG5vdCBpbiBnZW5lcmFsIHBsYXkgbmljZSB3aXRoIHRoZSBSIGVjb3N5c3RlbS4gVGhlcmVmb3JlLCB0aGUgUiBkYXRhYmFzZSBjb25uZWN0aW9uIHBhY2thZ2UgYWxsb3dzIG9uZSB0byBlaXRoZXIgYXV0b21hdGljYWxseSB0cmFuc2xhdGUgYEJJR0lOVGBzIHRvIGRvdWJsZXMgb3IgcmV0YWluIHRoZW0gYXMgYGludGVnZXI2NGBzLiBXaGlsZSBvbmUgY291bGQgdGhpbmsgdGhhdCBoZXJlIHRoZSBzZW5zaWJsZSBvcHRpb24gd291bGQgYmUgdG8gcmV0YWluIGFsbCBgQklHSU5UYCBjb2x1bW5zIGFzIGBpbnRlZ2VyNjRgcywgYSBwcm9ibGVtIHRoZW4gYXBwZWFycyB3aGVyZSBmb3IgZXhhbXBsZSBhbGwgYENPVU5UYCByZXN1bHRzIGFyZSBgaW50ZWdlcjY0YCBhcyB3ZWxsLiBBcyBzdWNoIGNvdW50cyBhcmUgZXh0cmVtZWx5IGNvbW1vbiBpbiBvdXIgcXVlcmllcywgYWx3YXlzIG1hbnVhbGx5IGNvbnZlcnRpbmcgdGhlaXIgcmVzdWx0cyBpcyBhcmR1b3VzLiBUaGVyZWZvcmUsIHRoaXMgbm90ZWJvb2sgYWN0dWFsbHkgYWx3YXlzIGluY2x1ZGVzIHR3byB2ZXJzaW9ucyBvZiB0aGUgY29ubmVjdGlvbiBhbmQgdGFibGVzOiB0aGUgb25lIHdpdGggYW4gYF9pYCBzdWZmaXggZG9lcyBub3QgdHJhbnNsYXRlIHJlc3VsdHMgaW50byBkb3VibGVzLCB3aGlsZSB0aGUgb25lIHdpdGhvdXQgdGhlIHN1ZmZpeCBkb2VzLiBUaGUgaGV1cmlzdGljIGZvciB1c2luZyB0aGVzZSB0d28gaXMgYmFzaWNhbGx5IGFzIGZvbGxvd3M6IGlmIHlvdSBkbyBpZC1iYXNlZCBqb2lucyB3aG9sbHkgd2l0aGluIHRoZSBkYXRhYmFzZSBiZWZvcmUgYGNvbGxlY3QoKWBpbmcgcmVzdWx0cyBpbnRvIFIsIGl0J3MgZmluZSB0byB1c2UgdGhlIG5vbi1zdWZmaXhlZCB2ZXJzaW9ucyBvZiB0aGUgdGFibGVzLiBIb3dldmVyLCBpZiB5b3UgKipkbyoqIHB1bGwgaW4gaWRzIGludG8gUiwgaXQgaXMgY3J1Y2lhbCB0byB1c2UgdGhlIGBfaWAgdmVyc2lvbnMsIGxlc3QgeW91IGVuZCB1cCB3aXRoIGRpZmZlcmVudCBpZHMgdGhhbiB5b3Ugc2hvdWxkLgoKVG8gZ2V0IHRvIGtub3cgUiBgdGlkeXZlcnNlYCwgaGVyZSBhcmUgc29tZSBncmVhdCB0dXRvcmlhbHM6CgogKiBodHRwczovL21vZGVybmRpdmUuY29tL2luZGV4Lmh0bWwgY2hhcHRlcnMgMS00IGFyZSB0aGUgYmVzdCBpbnRybyBpbnRvIFIgYW5kIHRpZHl2ZXJzZSB0aGF0IEkga25vdyBvZi4KICogVGhlbiwgaWYgeW91J3JlIGludGVyZXN0ZWQgaW4gZXhwYW5kaW5nIHlvdXIgdmlzdWFsIGFuYWx5c2lzIGNhcGFiaWxpdGllcywgZm9sbG93aW5nIHVwIHdpdGggaHR0cHM6Ly9zb2N2aXouY28vIGlzIGdvb2QuCiAqIEV4Y2VsbGVudCBjaGVhdHNoZWV0cyB0byBrZWVwIG9uIGhhbmQgb3IgZXZlbiBwcmludCB3aGlsZSBsZWFybmluZzogaHR0cHM6Ly93d3cucnN0dWRpby5jb20vcmVzb3VyY2VzL2NoZWF0c2hlZXRzLwogKiBBbmQgZmluYWxseSDigJxSIGZvciBEYXRhIFNjaWVuY2XigJ0gaXMgYSBjZW50cmFsIHdvcmsgYnkgdGhlIGF1dGhvcnMgb2YgdGhlIHBhY2thZ2VzLCBidXQgSSBkb27igJl0IHRoaW5rIGFzIGdvb2QgYXMgdGhlIGFib3ZlOiBodHRwczovL3I0ZHMuaGFkLmNvLm56Ly4gQ2FuIGJlIHVzZWQgdG8gc3VwcGxlbWVudCB0aGUgbW9kZXJuIGRpdmUgaWYgc29tZXRoaW5nIHJlbWFpbnMgdW5jbGVhciBvciBuZWVkcyBkZWVwZW5pbmcgYWZ0ZXIgdGhhdC4KCiMjIE92ZXJhbGwgdGVtcG9yYWwgb3V0bG9vayAobm90ZSBsb2dhcml0aG1pYyB5LXNjYWxlKQpgYGB7cn0KdHdlZXRzX2MgJT4lCiAgY291bnQoeWVhcl9jcmVhdGVkX2F0LG1vbnRoX2NyZWF0ZWRfYXQpICU+JSAKICBtdXRhdGUodHlwZT0idHdlZXRzIikgJT4lCiAgY29sbGVjdCgpICU+JQogIGJpbmRfcm93cygKICAgIHR3ZWV0c19jICU+JSAKICAgICAgZmlsdGVyKGNvbnZlcnNhdGlvbl9pZD09dHdlZXRfaWQpICU+JQogICAgICBjb3VudCh5ZWFyX2NyZWF0ZWRfYXQsbW9udGhfY3JlYXRlZF9hdCkgJT4lIAogICAgICBtdXRhdGUodHlwZT0iY29udmVyc2F0aW9ucyIpICU+JQogICAgICBjb2xsZWN0KCkKICApICU+JQogIG11dGF0ZShkYXRlPW1ha2VfZGF0ZSh5ZWFyX2NyZWF0ZWRfYXQsbW9udGhfY3JlYXRlZF9hdCkpICU+JQogIGdncGxvdChhZXMoeD1kYXRlLHk9bixjb2xvcj10eXBlKSkgKwogIGdlb21fbGluZSgpICsKICB0aGVtZV9oc2NpX2Rpc2NyZXRlKCkgKyAKICBzY2FsZV95X2xvZzEwKGxhYmVscz1zY2FsZXM6OmNvbW1hKSArCiAgbGFicyhjb2xvcj1OVUxMKSArCiAgc2NhbGVfeF9kYXRlKGRhdGVfYnJlYWtzPSIyIHllYXJzIixkYXRlX2xhYmVscyA9ICIlWSIpCmBgYAoKT3ZlcmFsbCwgb3VyIGRhdGEgaGFzIHRoZSBtb3N0IGNvbnZlcnNhdGlvbnMgYW5kIHR3ZWV0cyBpbiB0aGUgcGVyaW9kIGZyb20gd2hpY2ggdGhlIHNlZWQgdHdlZXRzIHdlcmUgZ2F0aGVyZWQgZnJvbSwgYnV0IGludGVyZXN0aW5nbHksIHRoZXJlIGFyZSBhbHNvIG11bHRpcGxlIGRpc2N1c3Npb25zIHRoYXQgaGF2ZSBnb25lIG9uIGZvciBtdWNoIGxvbmdlci4gUGFydGljdWxhcmx5IGludGVyZXN0aW5nIGlzIHRoZSBodWdlIHNwaWtlIGluIHR3ZWV0cyBvcmlnaW5hdGluZyBmcm9tIDIwMTYgYW5kIHN0aWxsIGNvbnRpbnVpbmcsIHRvIHdoaWNoIHRoZSBjb252b3ktdHdlZXRzIGdldCBhdHRhY2hlZCB0by4KCiMgRnJlZWRvbSBjb252b3kgLXBlcmlvZCAoZmlyc3QgdHdvIHdlZWtzKQoKIyMgVG90YWwgdHdlZXRzIGluIG9yaWdpbmFsIHNhbXBsZQoKYGBge3J9CnR3ZWV0c19jICU+JSAKICBmaWx0ZXIob3JpZ2luYWwsY3JlYXRlZF9hdD49YXMuRGF0ZSgiMjAyMi0wMS0yMiIpLGNyZWF0ZWRfYXQ8YXMuRGF0ZSgiMjAyMi0wMi0wNSIpKSAlPiUKICBtdXRhdGUoZGF0ZT1kYXRlKGNyZWF0ZWRfYXQpKSAlPiUKICBncm91cF9ieShkYXRlKSAlPiUKICBzdW1tYXJpemUoYHNhbXBsZSB0d2VldHNgPW4oKSwgYHNhbXBsZSBub24tcmV0d2VldHNgPXN1bShpcy5uYShyZXR3ZWV0X29mKSksIGNvbnZlcnNhdGlvbnM9bl9kaXN0aW5jdChjb252ZXJzYXRpb25faWQpLCBgdXItY29udmVyc2F0aW9uc2A9bl9kaXN0aW5jdCh1cl9jb252ZXJzYXRpb25faWQpLC5ncm91cHM9ImRyb3AiKSAlPiUKICBjb2xsZWN0KCkgJT4lCiAgcGl2b3RfbG9uZ2VyKGBzYW1wbGUgdHdlZXRzYDpgdXItY29udmVyc2F0aW9uc2ApICU+JQogIGJpbmRfcm93cygKICAgIHR3ZWV0c19jICU+JSAKICAgICAgZmlsdGVyKG9yaWdpbmFsLGNyZWF0ZWRfYXQ+PWFzLkRhdGUoIjIwMjItMDEtMjIiKSxjcmVhdGVkX2F0PGFzLkRhdGUoIjIwMjItMDItMDUiKSkgJT4lCiAgICAgIGRpc3RpbmN0KHVyX2NvbnZlcnNhdGlvbl9pZCkgJT4lCiAgICAgIGxlZnRfam9pbih0d2VldHNfYyxieT1jKCJ1cl9jb252ZXJzYXRpb25faWQiKSkgJT4lCiAgICAgIGZpbHRlcihjcmVhdGVkX2F0Pj1hcy5EYXRlKCIyMDIyLTAxLTIyIiksY3JlYXRlZF9hdDxhcy5EYXRlKCIyMDIyLTAyLTA1IikpICU+JQogICAgICBtdXRhdGUoZGF0ZT1kYXRlKGNyZWF0ZWRfYXQpKSAlPiUKICAgICAgZ3JvdXBfYnkoZGF0ZSkgJT4lCiAgICAgIHN1bW1hcml6ZShgdG90YWwgdHdlZXRzIGluIHVyLWNvbnZlcnNhdGlvbnNgPW4oKSwgYG5vbi1yZXR3ZWV0cyBpbiB1ci1jb252ZXJzYXRpb25zYD1zdW0oaXMubmEocmV0d2VldF9vZikpKSAlPiUKICAgICAgY29sbGVjdCgpICU+JQogICAgICBwaXZvdF9sb25nZXIoYHRvdGFsIHR3ZWV0cyBpbiB1ci1jb252ZXJzYXRpb25zYDpgbm9uLXJldHdlZXRzIGluIHVyLWNvbnZlcnNhdGlvbnNgKQogICkgJT4lCiAgZ2dwbG90KGFlcyh4PWRhdGUseT12YWx1ZSxjb2xvcj1uYW1lKSkgKwogIGdlb21fc3RlcCgpICsKICB0aGVtZV9oc2NpX2Rpc2NyZXRlKCkgKwogIHNjYWxlX3lfY29udGludW91cyhsYWJlbHM9c2NhbGVzOjpjb21tYSkgKwogIGxhYnMoY29sb3I9TlVMTCkgKwogIHlsYWIoIk4iKQpgYGAKCiMjIENvbnZlcnNhdGlvbiBsZW5ndGggcG93ZXItbGF3CgpgYGB7cn0KdHdlZXRzX2MgJT4lCiAgY291bnQoY29udmVyc2F0aW9uX2lkKSAlPiUKICBnZ3Bsb3QoYWVzKHg9bikpICsKICBnZW9tX2hpc3RvZ3JhbShiaW5zPTEwMCkgKwogIHNjYWxlX3lfbG9nMTAobGFiZWxzPXNjYWxlczo6Y29tbWEpICsKICBzY2FsZV94X2xvZzEwKGxhYmVscz1zY2FsZXM6OmNvbW1hKSArCiAgdGhlbWVfaHNjaV9kaXNjcmV0ZSgpICsKICB5bGFiKCJOdW1iZXIgb2YgY29udmVyc2F0aW9ucyIpICsKICB4bGFiKCJUd2VldHMgaW4gY29udmVyc2F0aW9uIikKIApgYGAKCkEgdHlwaWNhbCBwb3dlci1sYXcgcmVsYXRpb25zaGlwOiB0aGVyZSBhcmUgYSBncmVhdCBtYW55IGRpc2N1c3Npb25zIHdpdGggb25seSBhIGZldyByZXBsaWVzLCBhbmQgdmVyeSBmZXcgZGlzY3Vzc2lvbnMgdGhhdCBnbyBvbiBmb3JldmVyCgojIyBSZXR3ZWV0L3JlcGx5IGNvdW50IHJlbGF0aW9uc2hpcAoKYGBge3J9CnR3ZWV0c19jICU+JSBtdXRhdGUoCiAgcnRfYmluPWZsb29yKGxvZzIocmV0d2VldF9jb3VudCkpLAogIHJlcGx5X2Jpbj1mbG9vcihsb2cyKHJlcGx5X2NvdW50KSkKKSAlPiUgCiAgcmVwbGFjZV9uYShsaXN0KHJ0X2Jpbj0wLHJlcGx5X2Jpbj0wKSkgJT4lCiAgY291bnQocnRfYmluLHJlcGx5X2JpbikgJT4lCiAgbXV0YXRlKG5fYmluPWZsb29yKGxvZzIobikpKSAlPiUKICBnZ3Bsb3QoYWVzKHg9cnRfYmluLHk9cmVwbHlfYmluLGZpbGw9bl9iaW4pKSArCiAgZ2VvbV9yYXN0ZXIoKSArCiAgc2NhbGVfeF9jb250aW51b3VzKGxhYmVscz1+c2NhbGVzOjpjb21tYSgyXi4pKSArCiAgc2NhbGVfeV9jb250aW51b3VzKGxhYmVscz1+c2NhbGVzOjpjb21tYSgyXi4pKSArCiAgdGhlbWVfaHNjaSgpICsKICBzY2FsZV9maWxsX3ZpcmlkaXNfYyhsYWJlbHM9fnNjYWxlczo6Y29tbWEoMl4uKSkgKwogIHhsYWIoIlJldHdlZXRzIikgKwogIHlsYWIoIlJlcGxpZXMiKSArCiAgbGFicyhmaWxsPSJUd2VldHMiKQpgYGAKCkl0IGlzIHF1aXRlIHBvc3NpYmxlIGZvciBhIHR3ZWV0IHRvIGdhcm5lciBhIGh1Z2UgbnVtYmVyIG9mIHJldHdlZXRzIHdpdGhvdXQgc3BhcmtpbmcgYW55IGRpc2N1c3Npb24uIFRoZSBvcHBvc2l0ZSBpcyBtdWNoIGxlc3MgbGlrZWx5LiBBcGFydCBmcm9tIHRoaXMsIHRoZSBudW1iZXIgb2YgcmV0d2VldHMgYW5kIHJlcGxpZXMgaXMgY29ycmVsYXRlZC4KCiMgU29tZSBsYXJnZSBjb252ZXJzYXRpb25zCgpgYGB7cn0KZCA8LSB1cl9jb252ZXJzYXRpb25zX2MgJT4lIAogIGFycmFuZ2UoZGVzYyh1Y191cl9kZXNjZW5kYW50cykpICU+JSAKICBoZWFkKDcpICU+JQogIHNlbGVjdCh1cl9jb252ZXJzYXRpb25faWQpICU+JQogIGxlZnRfam9pbih0d2VldHNfYyxieT1jKCJ1cl9jb252ZXJzYXRpb25faWQiKSkgJT4lCiAgbXV0YXRlKHllYXI9eWVhcihjcmVhdGVkX2F0KSxtb250aD1tb250aChjcmVhdGVkX2F0KSkgJT4lCiAgZ3JvdXBfYnkodXJfY29udmVyc2F0aW9uX2lkLHllYXIsbW9udGgpICU+JSAKICBtdXRhdGUodXJfY29udmVyc2F0aW9uX2lkPWFzLmNoYXJhY3Rlcih1cl9jb252ZXJzYXRpb25faWQpKSAlPiUKICBzdW1tYXJpemUobj1uKCksYXV0aG9ycz1uX2Rpc3RpbmN0KGF1dGhvcl9pZCksLmdyb3Vwcz0iZHJvcCIpICU+JQogIGNvbGxlY3QoKSAlPiUKICBtdXRhdGUoZGF0ZT1tYWtlX2RhdGUoeWVhcixtb250aCkpIApkICU+JQogIGdncGxvdChhZXMoeD1kYXRlLHk9bixjb2xvcj11cl9jb252ZXJzYXRpb25faWQpKSArCiAgZ2VvbV9zdGVwKCkgKwogIHRoZW1lX2hzY2lfZGlzY3JldGUoKQpkICU+JQogIGdncGxvdChhZXMoeD1kYXRlLHk9YXV0aG9ycyxjb2xvcj11cl9jb252ZXJzYXRpb25faWQpKSArCiAgZ2VvbV9zdGVwKCkgKwogIHRoZW1lX2hzY2lfZGlzY3JldGUoKQpgYGAKCmBgYHtyfQp1cl9jb252ZXJzYXRpb25zX2MgJT4lIAogIGFycmFuZ2UoZGVzYyh1Y191cl9kZXNjZW5kYW50cykpICU+JSAKICBoZWFkKDEwKSAlPiUKICBzZWxlY3QodXJfY29udmVyc2F0aW9uX2lkLHVjX3VyX2Rlc2NlbmRhbnRzLHVyX2Rlc2NlbmRhbnRzLHVyX21lYW5fcmVwbHlfY291bnQsdXJfbWVhbl9yZXR3ZWV0X2NvdW50KSAlPiUKICBsZWZ0X2pvaW4odHdlZXRzX2MgJT4lIHNlbGVjdCh1cl9jb252ZXJzYXRpb25faWQsYXV0aG9yX2lkKSxieT1jKCJ1cl9jb252ZXJzYXRpb25faWQiKSkgJT4lCiAgZ3JvdXBfYnkodXJfY29udmVyc2F0aW9uX2lkLHVjX3VyX2Rlc2NlbmRhbnRzLHVyX2Rlc2NlbmRhbnRzLHVyX21lYW5fcmVwbHlfY291bnQsdXJfbWVhbl9yZXR3ZWV0X2NvdW50KSAlPiUKICBzdW1tYXJpemUoYXV0aG9ycz1uX2Rpc3RpbmN0KGF1dGhvcl9pZCksLmdyb3Vwcz0iZHJvcCIpICU+JQogIG11dGF0ZSh1cl9jb252ZXJzYXRpb25faWQ9c3RyX2MoIlsiLHVyX2NvbnZlcnNhdGlvbl9pZCwiXShodHRwczovL3R3aXR0ZXIuY29tL2Evc3RhdHVzLyIsdXJfY29udmVyc2F0aW9uX2lkLCIpIikpICU+JQogIGFycmFuZ2UoZGVzYyh1Y191cl9kZXNjZW5kYW50cykpICU+JQogIGNvbGxlY3QoKSAlPiUKICByZWxvY2F0ZShhdXRob3JzLC5hZnRlcj11cl9kZXNjZW5kYW50cykgJT4lCiAgZ3QoKSAlPiUKICBmbXRfbWFya2Rvd24odXJfY29udmVyc2F0aW9uX2lkKSAlPiUKICBmbXRfaW50ZWdlcih1Y191cl9kZXNjZW5kYW50czphdXRob3JzKSAlPiUKICBmbXRfbnVtYmVyKHVyX21lYW5fcmVwbHlfY291bnQ6dXJfbWVhbl9yZXR3ZWV0X2NvdW50KQpgYGAKCgpgYGB7cn0KZGVzY2VuZGFudHMgPC0gZnVuY3Rpb24odHdlZXRfaWQpIHsgCiAgdGJsKGNvbixzcWwoZ2x1ZSgiV0lUSCBSRUNVUlNJVkUgZGVzY2VuZGFudHMgQVMgKCBTRUxFQ1QgdC50d2VldF9pZCx0LmluX3JlcGx5X3RvLCAwIEFTIGxldmVsIEZST00gdHdlZXRzX2EgdCBXSEVSRSB0d2VldF9pZD17dHdlZXRfaWR9IFVOSU9OIFNFTEVDVCB0LnR3ZWV0X2lkLHQuaW5fcmVwbHlfdG8sIGQubGV2ZWwrMSBBUyBsZXZlbCBGUk9NIHR3ZWV0c19hIHQsIGRlc2NlbmRhbnRzIGQgV0hFUkUgdC5pbl9yZXBseV90bz1kLnR3ZWV0X2lkICkgU0VMRUNUICogRlJPTSBkZXNjZW5kYW50cyIpKSkgCn0KdXJfY29udmVyc2F0aW9uc19jX2kgJT4lIAogIGFycmFuZ2UoZGVzYyh1Y191cl9kZXNjZW5kYW50cykpICU+JSAKICBmaWx0ZXIoIWlzLm5hKHR3ZWV0X2lkKSkgJT4lCiAgaGVhZCgxMCkgJT4lIAogIHNlbGVjdCh0d2VldF9pZCkgJT4lIAogIGNvbGxlY3QoKSAlPiUgCiAgbXV0YXRlKGNvbnZlcnNhdGlvbj1tYXAodHdlZXRfaWQsfmRlc2NlbmRhbnRzKC4pICU+JSAKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGhlYWQoMjApICU+JSAKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlbGVjdCh0d2VldF9pZCxsZXZlbCkgJT4lIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgbGVmdF9qb2luKHR3ZWV0c19hLGJ5PWMoInR3ZWV0X2lkIikpICU+JSAKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlbGVjdChsZXZlbCx0ZXh0KSAlPiUgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBtdXRhdGUocm93X251bWJlcj1yb3dfbnVtYmVyKCkpICU+JSAKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbGxlY3QoKSkpICU+JSAKICB1bm5lc3Rfd2lkZXIoY29udmVyc2F0aW9uKSAlPiUgCiAgdW5uZXN0X2xvbmdlcihsZXZlbDpyb3dfbnVtYmVyKSAlPiUgCiAgcGl2b3Rfd2lkZXIobmFtZXNfZnJvbT10d2VldF9pZCx2YWx1ZXNfZnJvbT10ZXh0LGlkX2NvbHM9cm93X251bWJlcikgJT4lIAogIHNlbGVjdCgtcm93X251bWJlcikgJT4lCiAgZ3QoKQpgYGAKCg==</div>
 
 
 

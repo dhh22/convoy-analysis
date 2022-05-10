@@ -8,8 +8,6 @@ output:
     toc: yes
 ---
 
-# Setup
-
 ```{r setup,include=FALSE}
 knitr::opts_knit$set(root.dir = here::here())
 library(here)
@@ -43,6 +41,91 @@ tweets_c %>%
   fmt_integer(tweets) %>%
   summary_rows(columns=tweets, fns=list(total="sum"))
 ```
+
+## Raw access to the tweet data
+
+The tweets are stored in a MariaDB (MySQL) database called `convoy` on host `vm1788.kaj.pouta.csc.fi`. The username for the database is `convoy`. The password is given separately. **DO NOT INCLUDE THE PASSWORD IN ANY CODE YOU COMMIT TO GITHUB**. If running this notebook, it will ask for the password the first time you run it, and then store it separately in your keyring.
+
+Our raw data is both large and complex. With such data, one cannot unfortunately always just use a default database configuration and trust that it does the right thing. Therefore, here are some details:
+
+ * The data has been loaded into both Aria as well as ColumnStore tables. Aria tables have a suffix of `_a` and ColumnStore tables a suffix of `_c`. 
+ * Generally, ColumnStore tables should be more performant for the types of analytical queries we are performing, so use those as a default. 
+ * However, for certain queries (at least including UNION ALL), the ColumnStore does weird things and is bog slow. For those, the `_a` variants may perform better.
+ * The ColumnStore does not support `WITH RECURSIVE` queries useful for thread analysis. Therefore, these have to be computed using Aria `_a` tables.
+ * Mixing the two types of tables should often lead to worse performance (but may not)
+   
+The database structure is as follows:
+
+ * `tweets_[a|c]` is the main table holding the tweets as well as their statistics.
+ * `users_[a|c]` contains user information. It is linked from `tweets` by `author_id` and `in_reply_to_user_id`.
+ * `tweet_mentions_[a|c]` links `tweet_id`s to `user_id`s they mention.
+ * `tweet_hashtags_[a|c]` links `tweet_id`s to the hashtags they contain.
+ * `tweet_urls_[a|c]` links `tweet_id`s to the urls they contain.
+ * `conversations_[a|c]` contains conversation-level info and stats for each `conversation_id`.
+ * `ur_conversations_[a|c]` contains ur-conversation-level info and stats for each `ur_conversation_id`.
+ 
+In the above, a *conversation* is a thread linked by `in_reply_to` links. In this view, whenever you retweet a tweet or quote-tweet it, you are starting a new, distinct converstaion instead of continuing an existing one. This is what the Twitter API deems a conversation and what their UI also generally shows, so a good view when examining conversations from a user's perspective. However, when looking at a conversation in aggregate, one may also want to look at *all* conversation sparked by some message, and include downstream conversations started from retweets and quotes as well. For this, our data also includes an `ur_conversation_id`, which joins together all tweets in some way related to a single starter or its descendants, whether there are retweets or quote-tweets in the middle of that chain or not.
+
+However, there is are two important caveats here:
+
+ 1. When tweets/users get deleted by twitter, it breaks the conversation chain upwards from the deleted tweet. This affects both ur-conversation resolution as well as calculating conversation statistics.
+ 1. It is possible for a tweet to be both a reply to a tweet as well as quote another tweet. For simplicity in this hackathon (for the conversations to remain clean trees instead of possibly cyclical DAGs), in such situations the tweet has **only** been associated with the ur-conversation to which it replies.
+ 
+## Statistics for conversations and ur-conversations
+
+The following statistics have been calculated for conversations and ur-conversations, and are available in the `tweets_[a|c]` table (remember that removed tweets can cause problems for most of these):
+
+ * `children`: the number of replies to this tweet
+ * `ur_children`: the number of retweets and quotes of, and replies to this tweet
+ * `descendants`: the total number of tweets after this one in the conversation
+ * `ur_descendants`: the total number of tweets after this one in the ur-conversation
+ * `leaf_descendants`: the total number of leaf tweets (tweets without further replies) in the conversation (a measure of conversation "breadth")
+ * `ur_leaf_descendants`: the total number of leaf tweets (tweets without further replies) in the ur-conversation (a measure of ur-conversation "breadth")
+ * `max_depth`: the maximum length reply chain discovered below this tweet
+ * `ur_max_depth`: the maximum length reply/retweet/quote chain discovered below this tweet
+ * `t_authors`: the total transitive amount of authors participating in the conversation branching down from this tweet
+ * `ur_t_authors`: the total transitive amount of authors participating in the ur-conversation branching down from this tweet
+ * `t_reply_count`: the total transitive reply count of the conversation branching down from this tweet (should be about equal to `descendants` if there are not too many missing tweets)
+ * `ur_t_reply_count`: the total transitive reply count of the ur-conversation branching down from this tweet
+ * `t_quote_count`: the total transitive quote count of the conversation branching down from this tweet
+ * `ur_t_quote_count`: the total transitive quote count of the ur-conversation branching down from this tweet
+ * `t_like_count`: the total transitive like count of the conversation branching down from this tweet
+ * `ur_t_like_count`: the total transitive like count of the ur-conversation branching down from this tweet
+ * `t_retweet_count`: the total transitive retweet count of the conversation branching down from this tweet
+ * `ur_t_retweet_count`: the total transitive retweet count of the ur-conversation branching down from this tweet
+ * `branching_factor`: the branching factor of the conversation tree, or the mean number of replies for each tweet that has replies
+ * `ur_branching_factor`: the branching factor of the ur-conversation tree, or the mean number of replies+quotes+retweets for each tweet that has them
+ * `mean_depth`: the mean depth of conversation branching down from this tweet
+ * `depth_mad`: the mean absolute deviation (a measure of variance) from the mean conversation depth
+ * `ur_mean_depth`: the mean depth of ur-conversation branching down from this tweet
+ * `ur_depth_mad`: the mean absolute deviation (a measure of variance) from the mean ur-conversation depth
+ * `mean_reply_count`: the mean count of replies for each tweet in the conversation branching down from this tweet
+ * `reply_count_mad`: the mean absolute deviation (a measure of variance) from the mean reply count
+ * `ur_mean_reply_count`: the mean count of replies for each tweet in the ur-conversation branching down from this tweet
+ * `ur_reply_count_mad`: the mean absolute deviation (a measure of variance) from the mean ur-conversation reply count
+ * `mean_quote_count`: the mean count of quotations of each tweet in the conversation branching down from this tweet
+ * `quote_count_mad`: the mean absolute deviation (a measure of variance) from the mean quotation count
+ * `ur_mean_quote_count`: the mean count of quotations of each tweet in the ur-conversation branching down from this tweet
+ * `ur_quote_count_mad`: the mean absolute deviation (a measure of variance) from the mean ur-conversation quotation count
+ * `mean_like_count`: the mean count of likes of each tweet in the conversation branching down from this tweet
+ * `like_count_mad`: the mean absolute deviation (a measure of variance) from the mean conversation like count
+ * `ur_mean_like_count`: the mean count of likes of each tweet in the ur-conversation branching down from this tweet
+ * `ur_like_count_mad`: the mean absolute deviation (a measure of variance) from the mean ur-conversation like count
+ * `mean_retweet_count`: the mean count of retweets of each tweet in the conversation branching down from this tweet
+ * `retweet`_count_mad`: the mean absolute deviation (a measure of variance) from the mean conversation retweet count
+ * `ur_mean_retweet_count`: the mean count of retweets of each tweet in the ur-conversation branching down from this tweet
+ * `ur_retweet_count_mad`: the mean absolute deviation (a measure of variance) from the mean ur-conversation retweet count
+
+## Using the data inside R
+
+Tweet, conversation, ur-conversation and user ids are all `BIGINT`s or 64bit integers in the database. R usually handles numbers in these ranges as doubles, which is problematic in the case of ids due to loss of precision (for example, `r bit64::as.integer64.character("1488952698795962372")` becomes actually `r as.character(1488952698795962372)`). To account for such situations, R includes an `integer64` data type. However, it does not in general play nice with the R ecosystem. Therefore, the R database connection package allows one to either automatically translate `BIGINT`s to doubles or retain them as `integer64`s. While one could think that here the sensible option would be to retain all `BIGINT` columns as `integer64`s, a problem then appears where for example all `COUNT` results are `integer64` as well. As such counts are extremely common in our queries, always manually converting their results is arduous. Therefore, this notebook actually always includes two versions of the connection and tables: the one with an `_i` suffix does not translate results into doubles, while the one without the suffix does. The heuristic for using these two is basically as follows: if you do id-based joins wholly within the database before `collect()`ing results into R, it's fine to use the non-suffixed versions of the tables. However, if you **do** pull in ids into R, it is crucial to use the `_i` versions, lest you end up with different ids than you should.
+
+To get to know R `tidyverse`, here are some great tutorials:
+
+ * https://moderndive.com/index.html chapters 1-4 are the best intro into R and tidyverse that I know of.
+ * Then, if you're interested in expanding your visual analysis capabilities, following up with https://socviz.co/ is good.
+ * Excellent cheatsheets to keep on hand or even print while learning: https://www.rstudio.com/resources/cheatsheets/
+ * And finally “R for Data Science” is a central work by the authors of the packages, but I don’t think as good as the above: https://r4ds.had.co.nz/. Can be used to supplement the modern dive if something remains unclear or needs deepening after that.
 
 ## Overall temporal outlook (note logarithmic y-scale)
 ```{r}
@@ -100,7 +183,7 @@ tweets_c %>%
   ylab("N")
 ```
 
-## Discussion length power-law
+## Conversation length power-law
 
 ```{r}
 tweets_c %>%
@@ -110,8 +193,8 @@ tweets_c %>%
   scale_y_log10(labels=scales::comma) +
   scale_x_log10(labels=scales::comma) +
   theme_hsci_discrete() +
-  ylab("Number of discussions") +
-  xlab("Tweets in discussion")
+  ylab("Number of conversations") +
+  xlab("Tweets in conversation")
  
 ```
 
@@ -185,8 +268,25 @@ ur_conversations_c %>%
 
 ```{r}
 descendants <- function(tweet_id) { 
-  tbl(con,sql(glue("WITH RECURSIVE descendants AS ( SELECT t.tweet_id,t.in_reply_to FROM tweets_a t WHERE tweet_id={tweet_id} UNION SELECT t.tweet_id,t.in_reply_to FROM tweets_a t, descendants d WHERE t.in_reply_to=d.tweet_id ) SELECT * FROM descendants"))) 
+  tbl(con,sql(glue("WITH RECURSIVE descendants AS ( SELECT t.tweet_id,t.in_reply_to, 0 AS level FROM tweets_a t WHERE tweet_id={tweet_id} UNION SELECT t.tweet_id,t.in_reply_to, d.level+1 AS level FROM tweets_a t, descendants d WHERE t.in_reply_to=d.tweet_id ) SELECT * FROM descendants"))) 
 }
-descendants("647567168167636992") %>% head(10) %>% select(tweet_id) %>% left_join(tweets_a,by=c("tweet_id")) %>% select(text)
+ur_conversations_c_i %>% 
+  arrange(desc(uc_ur_descendants)) %>% 
+  filter(!is.na(tweet_id)) %>%
+  head(10) %>% 
+  select(tweet_id) %>% 
+  collect() %>% 
+  mutate(conversation=map(tweet_id,~descendants(.) %>% 
+                            head(20) %>% 
+                            select(tweet_id,level) %>% 
+                            left_join(tweets_a,by=c("tweet_id")) %>% 
+                            select(level,text) %>% 
+                            mutate(row_number=row_number()) %>% 
+                            collect())) %>% 
+  unnest_wider(conversation) %>% 
+  unnest_longer(level:row_number) %>% 
+  pivot_wider(names_from=tweet_id,values_from=text,id_cols=row_number) %>% 
+  select(-row_number) %>%
+  gt()
 ```
 
