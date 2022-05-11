@@ -1,7 +1,9 @@
+import os
 import sys
-sys.path.append('code')
-sys.path.append('..')
-from common_basis import con
+sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+import common_basis
+
+con = common_basis.con
 
 import pandas as pd
 import seaborn as sns
