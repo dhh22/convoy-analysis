@@ -1,0 +1,11 @@
+name: Publish Document
+title:
+username:
+account: rpubs
+server: rpubs.com
+hostUrl: rpubs.com
+appId: https://api.rpubs.com/api/v1/document/900626/0dd9159acf804bd2be74fe22386d34ee
+bundleId: https://api.rpubs.com/api/v1/document/900626/0dd9159acf804bd2be74fe22386d34ee
+url: http://rpubs.com/jiemakel/900626
+when: 1652292041.1145
+lastSyncTime: 1652292041.1145

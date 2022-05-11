@@ -42,7 +42,7 @@ tweets_c %>%
   summary_rows(columns=tweets, fns=list(total="sum"))
 ```
 
-Original sample is defined as follows: `twarc2 search --archive --start-time '2022-01-22' --end-time '2022-02-05' 'lang:en ("#TruckersForFreedom" OR "#FreedomConvoy2022" OR "#TruckerConvoy2022" OR "#NoVaccineMandate" OR "#ConvoyForFreedom" OR "#FreedomConvoyCanada" OR "#FluTruxKlan" OR "#FluTrucksKlan" OR "#EndTheStigma" OR "#TrudeauIsACoward" OR "#CowardOfCanada" OR "#ResignTrudeau" OR "#Omicronvoy" OR "#OttawaOccupation" OR "#HonkHonk" OR "#honkhonk" OR "#TruckersForFreedom2020" OR "#freedomconvoy" OR "#OttawaOccupied" OR "#TrudeauMustResign" OR "#OttawaSiege" OR "#CanadaTruckers" OR "#OttawaOccupiers" OR "#freedomconvoy22" OR "#TrudeauTyranny" OR "#FluTruckKlan" OR "#GoHomeTruckers" OR "#ConvoyGoHome" OR "#GoHomeFluTruxclan" OR "#flutrucksclangohome" OR "#freedumbConvoy2022" OR "#Clownvoy" OR "#FluTruxKlanGoHome" OR "#GoHomeConvoy" OR "#IAmVaxxed" OR "#ConvoyGoHome" OR "Go Home" OR "Canadian Trucking Alliance" OR "PM Trudeau" OR "Prime Minister Justin Trudeau" OR "Prime Minister")' convoy_2weeks.jsonl`
+Original sample is defined as follows: <code>twarc2 search --archive --start-time '2022-01-22' --end-time '2022-02-05' 'lang:en ("#TruckersForFreedom" OR "#FreedomConvoy2022" OR "#TruckerConvoy2022" OR "#NoVaccineMandate" OR "#ConvoyForFreedom" OR "#FreedomConvoyCanada" OR "#FluTruxKlan" OR "#FluTrucksKlan" OR "#EndTheStigma" OR "#TrudeauIsACoward" OR "#CowardOfCanada" OR "#ResignTrudeau" OR "#Omicronvoy" OR "#OttawaOccupation" OR "#HonkHonk" OR "#honkhonk" OR "#TruckersForFreedom2020" OR "#freedomconvoy" OR "#OttawaOccupied" OR "#TrudeauMustResign" OR "#OttawaSiege" OR "#CanadaTruckers" OR "#OttawaOccupiers" OR "#freedomconvoy22" OR "#TrudeauTyranny" OR "#FluTruckKlan" OR "#GoHomeTruckers" OR "#ConvoyGoHome" OR "#GoHomeFluTruxclan" OR "#flutrucksclangohome" OR "#freedumbConvoy2022" OR "#Clownvoy" OR "#FluTruxKlanGoHome" OR "#GoHomeConvoy" OR "#IAmVaxxed" OR "#ConvoyGoHome" OR "Go Home" OR "Canadian Trucking Alliance" OR "PM Trudeau" OR "Prime Minister Justin Trudeau" OR "Prime Minister")' convoy_2weeks.jsonl</code>
 
 ## Raw access to the tweet data
 
@@ -178,24 +178,22 @@ tweets_c %>%
   ) %>%
   bind_rows(
     tbl(con,sql('
-    WITH RECURSIVE descendants AS ( 
-      SELECT t.tweet_id, t.in_reply_to, t.date_created_at 
-      FROM tweets_a t 
-      WHERE 
-        t.original AND 
-        t.created_at>="2022-01-22" AND 
-        t.created_at<"2022-02-05"
-      UNION 
-      SELECT t.tweet_id, t.in_reply_to, t.date_created_at 
-      FROM tweets_a t, descendants d 
-      WHERE 
-        t.in_reply_to=d.tweet_id AND
-        t.created_at>="2022-01-22" AND 
-        t.created_at<"2022-02-05"
-    ) 
-    SELECT date_created_at, COUNT(*) AS value
-    FROM descendants
-    GROUP BY date_created_at')) %>%
+      WITH RECURSIVE descendants AS ( 
+        SELECT t.tweet_id
+        FROM tweets_a t 
+        WHERE 
+          t.original=1
+        UNION 
+        SELECT t.tweet_id
+        FROM tweets_a t FORCE INDEX (in_reply_to), descendants d 
+        WHERE 
+          t.in_reply_to=d.tweet_id
+      ) 
+      SELECT date_created_at, COUNT(*) AS value
+      FROM descendants INNER JOIN tweets_a USING (tweet_id)
+      WHERE date_created_at>="2022-01-22" AND date_created_at<"2022-02-05"
+      GROUP BY date_created_at
+    ')) %>%
     collect() %>%
     mutate(name="total tweets in downstream discussions")
   ) %>%
@@ -275,9 +273,9 @@ d %>%
 ur_conversations_c %>% 
   arrange(desc(uc_ur_descendants)) %>% 
   head(10) %>%
-  select(ur_conversation_id,uc_ur_descendants,ur_descendants,ur_mean_reply_count,ur_mean_retweet_count) %>%
+  select(ur_conversation_id,created_at,uc_ur_descendants,ur_descendants,ur_mean_reply_count,ur_mean_retweet_count) %>%
   left_join(tweets_c %>% select(ur_conversation_id,author_id),by=c("ur_conversation_id")) %>%
-  group_by(ur_conversation_id,uc_ur_descendants,ur_descendants,ur_mean_reply_count,ur_mean_retweet_count) %>%
+  group_by(ur_conversation_id,created_at,uc_ur_descendants,ur_descendants,ur_mean_reply_count,ur_mean_retweet_count) %>%
   summarize(authors=n_distinct(author_id),.groups="drop") %>%
   mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
   arrange(desc(uc_ur_descendants)) %>%
@@ -292,7 +290,16 @@ ur_conversations_c %>%
 
 ```{r}
 descendants <- function(tweet_id) { 
-  tbl(con,sql(glue("WITH RECURSIVE descendants AS ( SELECT t.tweet_id,t.in_reply_to, 0 AS level FROM tweets_a t WHERE tweet_id={tweet_id} UNION SELECT t.tweet_id,t.in_reply_to, d.level+1 AS level FROM tweets_a t, descendants d WHERE t.in_reply_to=d.tweet_id ) SELECT * FROM descendants"))) 
+  tbl(con,sql(glue("
+                   WITH RECURSIVE descendants AS ( 
+                     SELECT t.tweet_id, 0 AS level 
+                     FROM tweets_a t 
+                     WHERE tweet_id={tweet_id} 
+                     UNION 
+                     SELECT t.tweet_id, d.level+1 AS level
+                     FROM tweets_a t FORCE INDEX (in_reply_to), descendants d 
+                     WHERE t.in_reply_to=d.tweet_id 
+                   ) SELECT * FROM descendants"))) 
 }
 ur_conversations_c_i %>% 
   arrange(desc(uc_ur_descendants)) %>% 
@@ -312,5 +319,320 @@ ur_conversations_c_i %>%
   pivot_wider(names_from=tweet_id,values_from=text,id_cols=row_number) %>% 
   select(-row_number) %>%
   gt()
+```
+
+## Conversation 1254210334241419264 - the MOAC (Mother of All [Climate Change + Spam] Conversations)
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1254210334241419264")) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original),
+    authors=n_distinct(author_id),
+    min_date=min(created_at),
+    max_date=max(created_at)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(ur_conversation_id==sql("1254210334241419264")) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1254210334241419264")) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1254210334241419264")) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("1254210334241419264")) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("1254210334241419264")) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+
+## Conversation 647567168167636992: the erotic fiction
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("647567168167636992")) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original),
+    authors=n_distinct(author_id),
+    min_date=min(created_at),
+    max_date=max(created_at)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(ur_conversation_id==sql("647567168167636992")) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("647567168167636992")) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("647567168167636992")) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("647567168167636992")) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("647567168167636992")) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+
+## Conversation 1488162322187182085: Trudeau tests positive for COVID-19
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1488162322187182085")) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original),
+    authors=n_distinct(author_id),
+    min_date=min(created_at),
+    max_date=max(created_at)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(ur_conversation_id==sql("1488162322187182085")) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1488162322187182085")) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1488162322187182085")) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("1488162322187182085")) %>% 
+  filter(created_at<"2022-03-01") %>%
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("1488162322187182085")) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+## Conversation 1225501300789477377: The British Slugfest
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1225501300789477377")) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original),
+    authors=n_distinct(author_id),
+    min_date=min(created_at),
+    max_date=max(created_at)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(ur_conversation_id==sql("1225501300789477377")) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1225501300789477377")) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(ur_conversation_id==sql("1225501300789477377")) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("1225501300789477377")) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(ur_conversation_id==sql("1225501300789477377")) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
 ```
 
