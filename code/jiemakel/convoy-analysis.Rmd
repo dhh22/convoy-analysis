@@ -207,6 +207,23 @@ tweets_c %>%
 
 ## Conversation length power-law
 
+### Ur-conversations
+
+```{r}
+tweets_c %>%
+  count(ur_conversation_id) %>%
+  ggplot(aes(x=n)) +
+  geom_histogram(bins=100) +
+  scale_y_log10(labels=scales::comma) +
+  scale_x_log10(labels=scales::comma) +
+  theme_hsci_discrete() +
+  ylab("Number of ur-conversations") +
+  xlab("Tweets in ur-conversation")
+ 
+```
+
+### Conversations
+
 ```{r}
 tweets_c %>%
   count(conversation_id) %>%
@@ -864,6 +881,495 @@ tweets_c %>%
 ```{r}
 tweets_c %>% 
   filter(ur_conversation_id==sql(ur_conversation_id_key)) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+## Conversation 1486352737935798274: random "real" (10-100 message) conversation 1
+
+```{r}
+conversation_id_key <- "1486352737935798274"
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original, na.rm=T),
+    authors=n_distinct(author_id),
+    min_date=min(created_at, na.rm=T),
+    max_date=max(created_at, na.rm=T)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(conversation_id==sql(conversation_id_key)) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author, na.rm=T)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+## Conversation 1486352747347812353: random "real" (10-100 message) conversation 2
+
+```{r}
+conversation_id_key <- "1486352747347812353"
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original, na.rm=T),
+    authors=n_distinct(author_id),
+    min_date=min(created_at, na.rm=T),
+    max_date=max(created_at, na.rm=T)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(conversation_id==sql(conversation_id_key)) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author, na.rm=T)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+## Conversation 1486352996304830466: random "real" (10-100 message) conversation 3
+
+```{r}
+conversation_id_key <- "1486352996304830466"
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original, na.rm=T),
+    authors=n_distinct(author_id),
+    min_date=min(created_at, na.rm=T),
+    max_date=max(created_at, na.rm=T)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(conversation_id==sql(conversation_id_key)) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author, na.rm=T)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+## Conversation 1485662249624780807: random "real" "long" (50-150 message, max_depth>=20, authors<messages/3, keywords in at least messages/10, starting >=2022-01-22) conversation 1
+
+Code for pulling random "real" conversation ids:
+```
+conversations_c_i %>% 
+ filter(created_at>=as.Date("2022-01-22"),c_descendants>=50,c_descendants<=200,max_depth>=20,!is.na(tweet_id),authors<c_descendants/3) %>%
+ left_join(tweets_c_i %>% 
+   filter(original) %>% 
+   count(conversation_id,name="originals") ,by=c("conversation_id")
+  ) %>% 
+  filter(originals>=c_descendants/10) %>% 
+  arrange(sql("RAND()")) %>% 
+  head(3) %>% 
+  pull(conversation_id)
+ ``` output: `1486700611928309763 1486730979968495616 1486100674152906752`
+
+```{r}
+conversation_id_key <- "1486700611928309763"
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original, na.rm=T),
+    authors=n_distinct(author_id),
+    min_date=min(created_at, na.rm=T),
+    max_date=max(created_at, na.rm=T)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(conversation_id==sql(conversation_id_key)) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author, na.rm=T)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+
+## Conversation 1486730979968495616: random "real" "long" (50-150 message, max_depth>=20, authors<messages/3, keywords in at least messages/10, starting >=2022-01-22) conversation 2
+
+```{r}
+conversation_id_key <- "1486730979968495616"
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original, na.rm=T),
+    authors=n_distinct(author_id),
+    min_date=min(created_at, na.rm=T),
+    max_date=max(created_at, na.rm=T)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(conversation_id==sql(conversation_id_key)) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author, na.rm=T)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
+  count(hashtag,year_created_at) %>% 
+  group_by(year_created_at) %>% 
+  slice_max(n,n=10) %>%
+  gt(groupname_col="year_created_at",rowname_col="hashtag")
+```
+
+## Conversation 1486100674152906752: random "real" "long" (50-150 message, max_depth>=20, authors<messages/3, keywords in at least messages/10, starting >=2022-01-22) conversation 3
+
+```{r}
+conversation_id_key <- "1486100674152906752"
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  summarize(
+    tweets=n(),
+    tweets_with_keywords=sum(original, na.rm=T),
+    authors=n_distinct(author_id),
+    min_date=min(created_at, na.rm=T),
+    max_date=max(created_at, na.rm=T)
+  ) %>% collect() %>%
+  bind_cols(
+    tweets_c_i %>% 
+      filter(conversation_id==sql(conversation_id_key)) %>%
+      count(author_id,name="tweets_per_author") %>%
+      mutate(m_t_p_a=mean(tweets_per_author, na.rm=T)) %>%
+      summarize(mean_tweets_per_author=mean(tweets_per_author),tweets_per_author_mean_absolute_deviation=mean(abs(m_t_p_a-tweets_per_author))) %>% collect()
+  ) %>%
+  gt()
+```
+
+### First 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  arrange(created_at.x) %>%
+  head(20) %>% 
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Random 20 tweets
+
+```{r}
+tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  arrange(sql("RAND()")) %>%
+  head(20) %>%
+  arrange(created_at) %>%
+  left_join(users_c_i,by=c("author_id"="user_id")) %>%
+  mutate(tweet_id=str_c("[",tweet_id,"](https://twitter.com/a/status/",tweet_id,")")) %>%
+  mutate(conversation_id=str_c("[",conversation_id,"](https://twitter.com/a/status/",conversation_id,")")) %>%
+  mutate(ur_conversation_id=str_c("[",ur_conversation_id,"](https://twitter.com/a/status/",ur_conversation_id,")")) %>%
+  gt() %>%
+  fmt_markdown(tweet_id|conversation_id|ur_conversation_id)
+```
+
+### Temporal extent
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
+  count(original,date_created_at) %>%
+  collect() %>%
+  mutate(original=if_else(original==1,"contains keywords","expanded conversation")) %>%
+  ggplot(aes(x=date_created_at,y=n,fill=original)) +
+  geom_col(width=1,position = 'stack') + 
+  theme_hsci_discrete()
+```
+
+### Top hashtags per year
+
+```{r}
+tweets_c %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>% 
   left_join(tweet_hashtags_c,by=c("tweet_id")) %>% 
   count(hashtag,year_created_at) %>% 
   group_by(year_created_at) %>% 
