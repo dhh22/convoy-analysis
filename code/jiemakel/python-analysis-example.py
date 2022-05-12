@@ -15,11 +15,17 @@
 # ---
 
 # %%
+# can be used to install requirements from within Jupyter
+# !wget -nc https://raw.githubusercontent.com/dhh22/convoy-analysis/main/requirements.txt
+# !pip install -r requirements.txt
+
+# %%
 import os
 import sys
 if "__file__" in globals():
     sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 sys.path.append(os.getcwd()+"/code")
+sys.path.append("./code")
 sys.path.append(".")
 sys.path.append("..")
 import common_basis
