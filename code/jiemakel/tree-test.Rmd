@@ -1,0 +1,63 @@
+---
+title: "R Notebook"
+runtime: shiny
+---
+
+```{r setup,include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+library(tidyverse)
+library(here)
+library(glue)
+source(here("code/common_basis.R"))
+```
+
+
+```{r}
+conversation_id_key <- "1488162322187182085"
+conversation <- tweets_c_i %>% 
+  filter(conversation_id==sql(conversation_id_key)) %>%
+  select(tweet_id,in_reply_to,date_created_at) %>% 
+  arrange(in_reply_to) %>%
+  collect() %>%
+  mutate_all(as.character)
+roots <- conversation %>% 
+  filter(!is.na(in_reply_to),!(in_reply_to %in% conversation$tweet_id)) %>%
+  select(root_node=in_reply_to) %>%
+  union_all(conversation %>% filter(is.na(in_reply_to)) %>% select(root_node=tweet_id)) %>% 
+  distinct() %>%
+  pull(root_node)
+
+write_csv(conversation %>% 
+            mutate(url=str_c("https://twitter.com/a/status/",tweet_id)) %>% 
+            select(-in_reply_to),here(glue("data/conversation-{conversation_id_key}-metadata.csv")))
+```
+
+```{python}
+from collections import defaultdict
+tree = defaultdict(list)
+for child,parent in r.conversation[['tweet_id','in_reply_to']].itertuples(index=False, name=None):
+  if parent is not None:
+    tree[parent].append(child)
+stack = r.roots.copy()
+with open(r.here("data/conversation-"+r.conversation_id_key+"-tree.nwk"),"wb") as of:
+  of.write(bytes("(","ascii"))
+  while len(stack)>0:
+    cur_node = stack.pop()
+    if cur_node.startswith(")"):
+      of.seek(-1,2)
+      of.write(bytes(cur_node,"ascii"))
+    elif cur_node in tree:
+      of.write(bytes("(","ascii"))
+      stack.append(")"+cur_node+":1,")
+      stack.extend(sorted(tree[cur_node], key=lambda x: len(tree[x]) if x in tree else 0,reverse=True))
+    else:
+      of.write(bytes(cur_node,"ascii"))
+      of.write(bytes(":1,","ascii"))
+    i+=1
+  of.seek(-1,2)
+  of.write(bytes(")ROOT:1;","ascii"))
+
+```
+
+
+
