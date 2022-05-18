@@ -30,18 +30,26 @@ p <- function(number) {
 pp <- function(percentage,accuracy=0.01) {
   return(scales::percent(percentage, accuracy = accuracy))
 }
+
+enrich_with_analytical_categories <- function(df) {
+  df %>% mutate(tweet_type=case_when(
+    reply_count==0 & is.na(in_reply_to) ~ "dead starter",
+    reply_count==0 ~ "dead reply",
+    prolific_reply_count>=2 & is.na(in_reply_to) ~ "starter that results in branching",
+    prolific_reply_count>=2 ~ "reply that results in branching",
+    prolific_reply_count==1 & is.na(in_reply_to) ~ "starter that results in continuation",
+    prolific_reply_count==1 ~ "reply that results in continuation",
+    abortive_reply_count>=1 & is.na(in_reply_to) ~ "starter that results in dead replies",
+    abortive_reply_count>=1 ~ "reply that results in dead replies",
+    T ~ "reply that results in dead replies"
+  ))
+}
 ```
 
 ```{r}
 d <- tweets_c %>%
   filter(reply_count==children) %>%
-  mutate(tweet_type=case_when(
-    reply_count==0 ~ "dead",
-    prolific_reply_count>=2 ~ "branching",
-    prolific_reply_count==1 ~ "continuing",
-    abortive_reply_count>=1 ~ "abortive",
-    T ~ "abortive"
-  )) %>%
+  enrich_with_analytical_categories() %>%
   inner_join(users_c,by=c("author_id"="user_id")) %>%
   mutate(followers_count_bin=floor(log2(followers_count))) %>%
   count(followers_count_bin,tweet_type) %>%
@@ -62,13 +70,7 @@ d %>%
 ```{r}
 d <- tweets_c %>%
   filter(reply_count==children) %>%
-  mutate(tweet_type=case_when(
-    reply_count==0 ~ "dead",
-    prolific_reply_count>=2 ~ "branching",
-    prolific_reply_count==1 ~ "continuing",
-    abortive_reply_count>=1 ~ "abortive",
-    T ~ "abortive"
-  )) %>%
+  enrich_with_analytical_categories() %>%
   mutate(like_count_bin=floor(log2(like_count))) %>%
   count(like_count_bin,tweet_type) %>%
   group_by(like_count_bin) %>% 
@@ -88,24 +90,35 @@ d %>%
 ```{r}
 d <- tweets_c %>%
   filter(reply_count==children) %>%
-  mutate(tweet_type=case_when(
-    reply_count==0 ~ "dead",
-    prolific_reply_count>=2 ~ "branching",
-    prolific_reply_count==1 ~ "continuing",
-    abortive_reply_count>=1 ~ "abortive",
-    T ~ "abortive"
-  )) %>%
+  enrich_with_analytical_categories() %>%
   count(hashtags,tweet_type) %>%
   group_by(hashtags) %>% 
   mutate(tweet_type_proportion=n/sum(n)) %>%
   ungroup() %>%
   collect()
-library(ggbreak)
 d %>%
   ggplot(aes(x=hashtags,y=tweet_type_proportion,color=tweet_type)) +
   geom_step() +
   scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
   theme_hsci_discrete() +
   xlab("Number of hashtags") +
+  ylab("Proportion of tweets")
+```
+
+```{r}
+d <- tweets_c %>%
+  filter(reply_count==children) %>%
+  enrich_with_analytical_categories() %>%
+  count(mentions,tweet_type) %>%
+  group_by(mentions) %>% 
+  mutate(tweet_type_proportion=n/sum(n)) %>%
+  ungroup() %>%
+  collect()
+d %>%
+  ggplot(aes(x=mentions,y=tweet_type_proportion,color=tweet_type)) +
+  geom_step() +
+  scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+  theme_hsci_discrete() +
+  xlab("Number of mentions") +
   ylab("Proportion of tweets")
 ```
