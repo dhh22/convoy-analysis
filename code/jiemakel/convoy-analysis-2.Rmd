@@ -1,0 +1,111 @@
+---
+title: "Convoy analysis"
+author: "Eetu Mäkelä"
+date: "`r Sys.Date()`"
+output: 
+  html_notebook:
+    code_folding: hide
+    toc: yes
+---
+
+```{r setup,include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+library(here)
+source(here("code/common_basis.R"), local = knitr::knit_global())
+
+library(glue)
+library(tidyverse)
+library(lubridate)
+library(hms)
+library(ggbeeswarm)
+library(ggpointdensity)
+library(pak)
+pkg_install("hsci-r/gghsci")
+library(gghsci)
+library(gt)
+
+p <- function(number) {
+  return(format(number, scientific = FALSE, big.mark = ","))
+}
+pp <- function(percentage,accuracy=0.01) {
+  return(scales::percent(percentage, accuracy = accuracy))
+}
+```
+
+```{r}
+d <- tweets_c %>%
+  filter(reply_count==children) %>%
+  mutate(tweet_type=case_when(
+    reply_count==0 ~ "dead",
+    prolific_reply_count>=2 ~ "branching",
+    prolific_reply_count==1 ~ "continuing",
+    abortive_reply_count>=1 ~ "abortive",
+    T ~ "abortive"
+  )) %>%
+  inner_join(users_c,by=c("author_id"="user_id")) %>%
+  mutate(followers_count_bin=floor(log2(followers_count))) %>%
+  count(followers_count_bin,tweet_type) %>%
+  group_by(followers_count_bin) %>% 
+  mutate(tweet_type_proportion=n/sum(n)) %>%
+  ungroup() %>%
+  collect()
+d %>%
+  ggplot(aes(x=followers_count_bin,y=tweet_type_proportion,color=tweet_type)) +
+  geom_step() +
+  scale_x_continuous(breaks=seq(0,30,by=4),labels=~scales::comma(2^.)) +
+  scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+  theme_hsci_discrete() +
+  xlab("Followers") +
+  ylab("Proportion of tweets")
+```
+
+```{r}
+d <- tweets_c %>%
+  filter(reply_count==children) %>%
+  mutate(tweet_type=case_when(
+    reply_count==0 ~ "dead",
+    prolific_reply_count>=2 ~ "branching",
+    prolific_reply_count==1 ~ "continuing",
+    abortive_reply_count>=1 ~ "abortive",
+    T ~ "abortive"
+  )) %>%
+  mutate(like_count_bin=floor(log2(like_count))) %>%
+  count(like_count_bin,tweet_type) %>%
+  group_by(like_count_bin) %>% 
+  mutate(tweet_type_proportion=n/sum(n)) %>%
+  ungroup() %>%
+  collect()
+d %>%
+  ggplot(aes(x=like_count_bin,y=tweet_type_proportion,color=tweet_type)) +
+  geom_step() +
+  scale_x_continuous(breaks=seq(0,30,by=4),labels=~scales::comma(2^.)) +
+  scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+  theme_hsci_discrete() +
+  xlab("Likes") +
+  ylab("Proportion of tweets")
+```
+
+```{r}
+d <- tweets_c %>%
+  filter(reply_count==children) %>%
+  mutate(tweet_type=case_when(
+    reply_count==0 ~ "dead",
+    prolific_reply_count>=2 ~ "branching",
+    prolific_reply_count==1 ~ "continuing",
+    abortive_reply_count>=1 ~ "abortive",
+    T ~ "abortive"
+  )) %>%
+  count(hashtags,tweet_type) %>%
+  group_by(hashtags) %>% 
+  mutate(tweet_type_proportion=n/sum(n)) %>%
+  ungroup() %>%
+  collect()
+library(ggbreak)
+d %>%
+  ggplot(aes(x=hashtags,y=tweet_type_proportion,color=tweet_type)) +
+  geom_step() +
+  scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+  theme_hsci_discrete() +
+  xlab("Number of hashtags") +
+  ylab("Proportion of tweets")
+```
